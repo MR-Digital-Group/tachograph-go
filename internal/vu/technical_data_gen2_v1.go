@@ -340,24 +340,24 @@ func parseCalibrationRecordArrayGen2V1(data []byte, offset int) ([]*vuv1.Technic
 
 // gen2CalibrationRecord holds the parsed fields of a Gen2 VuCalibrationRecord.
 type gen2CalibrationRecord struct {
-	purpose                  ddv1.CalibrationPurpose
-	unrecognizedPurpose      int32
-	workshopName             *ddv1.StringValue
-	workshopAddress          *ddv1.StringValue
-	workshopCardNumber       *ddv1.FullCardNumber
-	workshopCardExpiryDate   *timestamppb.Timestamp
-	vin                      *ddv1.Ia5StringValue
-	vehicleRegistration      *ddv1.VehicleRegistrationIdentification
-	wVehicleCharConst        int32
-	kConstantRecordEquip     int32
-	lTyreCircumference       int32
-	tyreSize                 *ddv1.Ia5StringValue
-	authorisedSpeedKmh       int32
-	oldOdometerValueKm       int32
-	newOdometerValueKm       int32
-	oldTimeValue             *timestamppb.Timestamp
-	newTimeValue             *timestamppb.Timestamp
-	nextCalibrationDate      *timestamppb.Timestamp
+	purpose                ddv1.CalibrationPurpose
+	unrecognizedPurpose    int32
+	workshopName           *ddv1.StringValue
+	workshopAddress        *ddv1.StringValue
+	workshopCardNumber     *ddv1.FullCardNumber
+	workshopCardExpiryDate *timestamppb.Timestamp
+	vin                    *ddv1.Ia5StringValue
+	vehicleRegistration    *ddv1.VehicleRegistrationIdentification
+	wVehicleCharConst      int32
+	kConstantRecordEquip   int32
+	lTyreCircumference     int32
+	tyreSize               *ddv1.Ia5StringValue
+	authorisedSpeedKmh     int32
+	oldOdometerValueKm     int32
+	newOdometerValueKm     int32
+	oldTimeValue           *timestamppb.Timestamp
+	newTimeValue           *timestamppb.Timestamp
+	nextCalibrationDate    *timestamppb.Timestamp
 }
 
 // parseOneCalibrationRecordGen2 parses the base 168 bytes of a Gen2 VuCalibrationRecord.
@@ -698,24 +698,24 @@ func gen2CalibrationFromV1(rec *vuv1.TechnicalDataGen2V1_CalibrationRecord) gen2
 		return gen2CalibrationRecord{}
 	}
 	return gen2CalibrationRecord{
-		purpose:                  rec.GetPurpose(),
-		unrecognizedPurpose:      rec.GetUnrecognizedPurpose(),
-		workshopName:             rec.GetWorkshopName(),
-		workshopAddress:          rec.GetWorkshopAddress(),
-		workshopCardNumber:       rec.GetWorkshopCardNumber(),
-		workshopCardExpiryDate:   rec.GetWorkshopCardExpiryDate(),
-		vin:                      rec.GetVin(),
-		vehicleRegistration:      rec.GetVehicleRegistration(),
-		wVehicleCharConst:        rec.GetWVehicleCharacteristicConstant(),
-		kConstantRecordEquip:     rec.GetKConstantOfRecordingEquipment(),
-		lTyreCircumference:       rec.GetLTyreCircumferenceEighthsMm(),
-		tyreSize:                 rec.GetTyreSize(),
-		authorisedSpeedKmh:       rec.GetAuthorisedSpeedKmh(),
-		oldOdometerValueKm:       rec.GetOldOdometerValueKm(),
-		newOdometerValueKm:       rec.GetNewOdometerValueKm(),
-		oldTimeValue:             rec.GetOldTimeValue(),
-		newTimeValue:             rec.GetNewTimeValue(),
-		nextCalibrationDate:      rec.GetNextCalibrationDate(),
+		purpose:                rec.GetPurpose(),
+		unrecognizedPurpose:    rec.GetUnrecognizedPurpose(),
+		workshopName:           rec.GetWorkshopName(),
+		workshopAddress:        rec.GetWorkshopAddress(),
+		workshopCardNumber:     rec.GetWorkshopCardNumber(),
+		workshopCardExpiryDate: rec.GetWorkshopCardExpiryDate(),
+		vin:                    rec.GetVin(),
+		vehicleRegistration:    rec.GetVehicleRegistration(),
+		wVehicleCharConst:      rec.GetWVehicleCharacteristicConstant(),
+		kConstantRecordEquip:   rec.GetKConstantOfRecordingEquipment(),
+		lTyreCircumference:     rec.GetLTyreCircumferenceEighthsMm(),
+		tyreSize:               rec.GetTyreSize(),
+		authorisedSpeedKmh:     rec.GetAuthorisedSpeedKmh(),
+		oldOdometerValueKm:     rec.GetOldOdometerValueKm(),
+		newOdometerValueKm:     rec.GetNewOdometerValueKm(),
+		oldTimeValue:           rec.GetOldTimeValue(),
+		newTimeValue:           rec.GetNewTimeValue(),
+		nextCalibrationDate:    rec.GetNextCalibrationDate(),
 	}
 }
 

@@ -169,12 +169,26 @@ func (opts MarshalOptions) MarshalOverviewGen2V1(overview *vuv1.OverviewGen2V1) 
 	result = appendRecordArrayHeader(result, 0x03, uint16(len(vinData)), 1)
 	result = append(result, vinData...)
 
-	// VehicleRegistrationIdentificationRecordArray (15 bytes)
-	vrnData, err := marshalOpts.MarshalVehicleRegistrationIdentification(overview.GetVehicleRegistrationWithNation())
+	// Registration, written as it was read: a VehicleRegistrationNumber (14 bytes, record
+	// type 0x0B) when it has no nation, else a VehicleRegistrationIdentification (15 bytes,
+	// record type 0x24).
+	vrn := overview.GetVehicleRegistrationWithNation()
+	var vrnData []byte
+	var vrnType byte
+	if vrn.HasNation() {
+		vrnData, err = marshalOpts.MarshalVehicleRegistrationIdentification(vrn)
+		vrnType = 0x24
+	} else {
+		vrnData, err = marshalOpts.MarshalStringValue(vrn.GetNumber())
+		if err == nil && len(vrnData) != 14 {
+			err = fmt.Errorf("invalid vehicle registration number length: got %d, want 14", len(vrnData))
+		}
+		vrnType = 0x0B
+	}
 	if err != nil {
 		return nil, fmt.Errorf("marshal VRN: %w", err)
 	}
-	result = appendRecordArrayHeader(result, 0x04, uint16(len(vrnData)), 1)
+	result = appendRecordArrayHeader(result, vrnType, uint16(len(vrnData)), 1)
 	result = append(result, vrnData...)
 
 	// CurrentDateTimeRecordArray (4 bytes)

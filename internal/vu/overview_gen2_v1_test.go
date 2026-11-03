@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/proto"
 
 	ddv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/dd/v1"
 	vuv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/vu/v1"
@@ -107,6 +108,76 @@ func TestParseVehicleRegistrationRecordArrayGen2V1(t *testing.T) {
 			}
 			if got := vrn.GetNumber().GetValue(); got != "AB123" {
 				t.Errorf("number = %q, want %q", got, "AB123")
+			}
+		})
+	}
+}
+
+// TestOverviewGen2V1WritesTheRegistrationAsRead builds Gen2 V1 overviews from the Gen2 V2
+// overview hexdump, whose layout differs only in the registration, and checks that a 14-byte
+// VehicleRegistrationNumber and a 15-byte VehicleRegistrationIdentification are each written
+// back at their own size, from the parsed fields and after anonymization.
+func TestOverviewGen2V1WritesTheRegistrationAsRead(t *testing.T) {
+	v2, err := readHexdump("testdata/records/004-anonymized/000-OVERVIEW_GEN2_V2.hexdump")
+	if err != nil {
+		t.Fatalf("read hexdump: %v", err)
+	}
+	// registrationAt walks past the certificate and VIN record arrays to the registration.
+	registrationAt := func(data []byte) int {
+		at := 0
+		for range 3 {
+			size, err := sizeOfRecordArray(data, at)
+			if err != nil {
+				t.Fatalf("record array at %d: %v", at, err)
+			}
+			at += size
+		}
+		return at
+	}
+	at := registrationAt(v2)
+	end := at + 5 + 15
+	number := []byte{0x01, 'A', 'B', '1', '2', '3', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '} // code page + 13 bytes
+	tests := []struct {
+		name       string
+		array      []byte
+		recordType byte
+		size       int
+		hasNation  bool
+	}{
+		{"VehicleRegistrationNumber", append([]byte{0x0B, 0x00, 0x0E, 0x00, 0x01}, number...), 0x0B, 14, false},
+		{"VehicleRegistrationIdentification", append([]byte{0x24, 0x00, 0x0F, 0x00, 0x01, 0x25}, number...), 0x24, 15, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := append(append(append([]byte{}, v2[:at]...), tt.array...), v2[end:]...)
+			overview, err := unmarshalOverviewGen2V1(data)
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			parsed := proto.CloneOf(overview)
+			parsed.SetRawData(nil)
+			for name, o := range map[string]*vuv1.OverviewGen2V1{
+				"parsed":     parsed,
+				"anonymized": AnonymizeOptions{}.anonymizeOverviewGen2V1(overview),
+			} {
+				marshaled, err := MarshalOptions{}.MarshalOverviewGen2V1(o)
+				if err != nil {
+					t.Fatalf("%s: marshal: %v", name, err)
+				}
+				recordType, size, count, _, err := parseRecordArrayHeader(marshaled, registrationAt(marshaled))
+				if err != nil {
+					t.Fatalf("%s: registration header: %v", name, err)
+				}
+				if recordType != tt.recordType || int(size) != tt.size || count != 1 {
+					t.Errorf("%s: registration written as type 0x%02X, %d × %d bytes; want type 0x%02X, 1 × %d bytes", name, recordType, count, size, tt.recordType, tt.size)
+				}
+				again, err := unmarshalOverviewGen2V1(marshaled)
+				if err != nil {
+					t.Fatalf("%s: unmarshal the written overview: %v", name, err)
+				}
+				if got := again.GetVehicleRegistrationWithNation().HasNation(); got != tt.hasNation {
+					t.Errorf("%s: nation present = %v, want %v", name, got, tt.hasNation)
+				}
 			}
 		})
 	}

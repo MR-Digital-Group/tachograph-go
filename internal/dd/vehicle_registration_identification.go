@@ -115,8 +115,11 @@ func (opts AnonymizeOptions) AnonymizeVehicleRegistrationIdentification(vreg *dd
 	}
 
 	result := &ddv1.VehicleRegistrationIdentification{}
-	// Preserve country (structural info)
-	result.SetNation(vreg.GetNation())
+	// Preserve country (structural info), and its absence: a Gen2 V1 overview's 14-byte
+	// VehicleRegistrationNumber has no nation and is written back without one.
+	if vreg.HasNation() {
+		result.SetNation(vreg.GetNation())
+	}
 	// Anonymize the registration number
 	result.SetNumber(opts.AnonymizeStringValue(vreg.GetNumber()))
 	return result

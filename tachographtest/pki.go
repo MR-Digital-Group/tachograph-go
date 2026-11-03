@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/way-platform/tachograph-go"
 	"github.com/way-platform/tachograph-go/internal/brainpool"
 )
 
@@ -392,4 +393,22 @@ func (p *PKI) Gen2VehicleUnit(tb testing.TB, edits ...func(*Gen2Certificate)) *G
 func (p *PKI) Gen2DriverCard(tb testing.TB, edits ...func(*Gen2Certificate)) *Gen2Chain {
 	tb.Helper()
 	return Gen2Equipment(tb, p.Gen2MSCA, p.Gen2MSCACertificate, P256, EquipmentDriverCardSign, edits...)
+}
+
+// TrustStore trusts the PKI's Gen1 root key and Gen2Root, with no link certificates and no revocations.
+func (p *PKI) TrustStore() tachograph.TrustStore {
+	return tachograph.TrustStore{
+		Gen1RootKeys:         [][]byte{p.Gen1Root.RootKey()},
+		Gen2RootCertificates: [][]byte{p.Gen2RootCertificate},
+	}
+}
+
+// Resolver builds a resolver from store, failing tb when store is malformed.
+func Resolver(tb testing.TB, store tachograph.TrustStore) tachograph.CertificateResolver {
+	tb.Helper()
+	resolver, err := tachograph.NewCertificateResolver(store)
+	if err != nil {
+		tb.Fatalf("certificate resolver: %v", err)
+	}
+	return resolver
 }

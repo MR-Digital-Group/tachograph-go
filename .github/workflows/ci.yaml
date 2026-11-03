@@ -4,6 +4,8 @@ on:
   pull_request:
     branches:
       - "*"
+      # "*" matches no slash, so the fork's patch base is named
+      - "gpswox/v0.18.2"
 
 jobs:
   build:

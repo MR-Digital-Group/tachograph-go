@@ -17,7 +17,7 @@ import (
 //	    memberStateCertificateRecordArray                MemberStateCertificateRecordArray,
 //	    vuCertificateRecordArray                         VuCertificateRecordArray,
 //	    vehicleIdentificationNumberRecordArray           VehicleIdentificationNumberRecordArray,
-//	    vehicleRegistrationIdentificationRecordArray     VehicleRegistrationIdentificationRecordArray,
+//	    vehicleRegistrationNumberRecordArray             VehicleRegistrationNumberRecordArray,
 //	    currentDateTimeRecordArray                       CurrentDateTimeRecordArray,
 //	    vuDownloadablePeriodRecordArray                  VuDownloadablePeriodRecordArray,
 //	    cardSlotsStatusRecordArray                       CardSlotsStatusRecordArray,
@@ -26,6 +26,12 @@ import (
 //	    vuControlActivityRecordArray                     VuControlActivityRecordArray,
 //	    signatureRecordArray                             SignatureRecordArray
 //	}
+//
+// The registration is a VehicleRegistrationNumberRecordArray: Data Dictionary 2.168 is
+// "Generation 2, version 1" and holds 14-byte VehicleRegistrationNumber records without the
+// nation, while the VehicleRegistrationIdentificationRecordArray (2.166a) is "Generation 2,
+// version 2". The Appendix 7 tables of Regulation (EU) 2021/1228 list the two the other way
+// round, so both are read by their record size.
 func unmarshalOverviewGen2V1(value []byte) (*vuv1.OverviewGen2V1, error) {
 	totalSize, signatureSize, err := sizeOfOverviewGen2V1(value)
 	if err != nil {
@@ -67,10 +73,10 @@ func unmarshalOverviewGen2V1(value []byte) (*vuv1.OverviewGen2V1, error) {
 	overview.SetVehicleIdentificationNumber(vin)
 	offset += bytesRead
 
-	// VehicleRegistrationIdentificationRecordArray
+	// VehicleRegistrationNumberRecordArray
 	vrn, bytesRead, err := parseVehicleRegistrationIdentificationRecordArray(data, offset)
 	if err != nil {
-		return nil, fmt.Errorf("parse VehicleRegistrationIdentificationRecordArray: %w", err)
+		return nil, fmt.Errorf("parse VehicleRegistrationNumberRecordArray: %w", err)
 	}
 	overview.SetVehicleRegistrationWithNation(vrn)
 	offset += bytesRead
@@ -345,8 +351,9 @@ func parseVehicleIdentificationNumberRecordArray(data []byte, offset int) (*ddv1
 	return vin, totalSize, nil
 }
 
-// parseVehicleRegistrationIdentificationRecordArray parses a VehicleRegistrationIdentificationRecordArray.
-// Expected: 1 record × 15 bytes (1 nation + 14 StringValue).
+// parseVehicleRegistrationIdentificationRecordArray parses the overview's registration record array.
+// Expected: 1 record of 14 bytes (VehicleRegistrationNumber: code page + 13 bytes, no nation) or
+// of 15 bytes (VehicleRegistrationIdentification: nation + VehicleRegistrationNumber).
 func parseVehicleRegistrationIdentificationRecordArray(data []byte, offset int) (*ddv1.VehicleRegistrationIdentification, int, error) {
 	_, recordSize, noOfRecords, headerSize, err := parseRecordArrayHeader(data, offset)
 	if err != nil {
@@ -361,9 +368,22 @@ func parseVehicleRegistrationIdentificationRecordArray(data []byte, offset int) 
 		return nil, 0, fmt.Errorf("insufficient data for VRI record")
 	}
 	var unmarshalOpts dd.UnmarshalOptions
-	vrn, err := unmarshalOpts.UnmarshalVehicleRegistrationIdentification(data[recordStart:recordEnd])
-	if err != nil {
-		return nil, 0, fmt.Errorf("unmarshal VRI: %w", err)
+	var vrn *ddv1.VehicleRegistrationIdentification
+	switch recordSize {
+	case 14:
+		number, err := unmarshalOpts.UnmarshalStringValue(data[recordStart:recordEnd])
+		if err != nil {
+			return nil, 0, fmt.Errorf("unmarshal VRN: %w", err)
+		}
+		vrn = &ddv1.VehicleRegistrationIdentification{}
+		vrn.SetNumber(number)
+	case 15:
+		vrn, err = unmarshalOpts.UnmarshalVehicleRegistrationIdentification(data[recordStart:recordEnd])
+		if err != nil {
+			return nil, 0, fmt.Errorf("unmarshal VRI: %w", err)
+		}
+	default:
+		return nil, 0, fmt.Errorf("unexpected vehicle registration record size: %d (expected 14 or 15)", recordSize)
 	}
 	totalSize := headerSize + int(recordSize)
 	return vrn, totalSize, nil

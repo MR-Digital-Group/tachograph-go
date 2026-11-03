@@ -108,12 +108,33 @@ const (
 	// Data signature verification failed. The signature does not match
 	// the data, suggesting data corruption or tampering after signing.
 	Authentication_DATA_SIGNATURE_INVALID Authentication_Status = 2
-	// Certificate verification failed. This can occur if:
-	// - A required certificate (MSCA or equipment) cannot be found
-	// - A certificate signature is invalid
-	// - A certificate has expired or is not yet valid
-	// - The certificate chain is broken
+	// A certificate in the chain failed: its signature, its issuer reference
+	// (CAR), its holder authorisation (role) or its validity when it was used.
+	// A card's signing certificate fails when it was valid at no time of the
+	// signing window.
 	Authentication_CERTIFICATE_VERIFICATION_FAILED Authentication_Status = 3
+	// The regulation leaves this record unsigned: the vehicle unit's download
+	// interface version and card download transfers, and a card's EF_ICC,
+	// EF_IC, EF_Card_Download and certificate files.
+	Authentication_UNSIGNED Authentication_Status = 4
+	// The regulation signs this record, but the file holds no signature for
+	// it, or an all-zero one.
+	Authentication_SIGNATURE_MISSING Authentication_Status = 5
+	// The chain's MSCA certificate verifies under its issuer, and the trust
+	// store marks its CHR revoked.
+	Authentication_CERTIFICATE_REVOKED Authentication_Status = 6
+	// No trusted root or ERCA link certificate leads to the MSCA certificate.
+	Authentication_CERTIFICATE_UNTRUSTED Authentication_Status = 7
+	// The file holds no certificates for this record: a vehicle unit download
+	// without an overview, or a card download without its certificate files.
+	Authentication_CERTIFICATE_MISSING Authentication_Status = 8
+	// The certificates verify, but their validity when the data was signed
+	// can't be established: a card's signing certificate was valid for only
+	// part of the window in which the card can have signed, or a vehicle unit
+	// download's overview, whose signed current date and time dates the
+	// download, doesn't verify. A record whose own signature fails is
+	// DATA_SIGNATURE_INVALID instead.
+	Authentication_CERTIFICATE_VALIDITY_UNKNOWN Authentication_Status = 9
 )
 
 // Enum value maps for Authentication_Status.
@@ -123,12 +144,24 @@ var (
 		1: "VERIFIED",
 		2: "DATA_SIGNATURE_INVALID",
 		3: "CERTIFICATE_VERIFICATION_FAILED",
+		4: "UNSIGNED",
+		5: "SIGNATURE_MISSING",
+		6: "CERTIFICATE_REVOKED",
+		7: "CERTIFICATE_UNTRUSTED",
+		8: "CERTIFICATE_MISSING",
+		9: "CERTIFICATE_VALIDITY_UNKNOWN",
 	}
 	Authentication_Status_value = map[string]int32{
 		"STATUS_UNSPECIFIED":              0,
 		"VERIFIED":                        1,
 		"DATA_SIGNATURE_INVALID":          2,
 		"CERTIFICATE_VERIFICATION_FAILED": 3,
+		"UNSIGNED":                        4,
+		"SIGNATURE_MISSING":               5,
+		"CERTIFICATE_REVOKED":             6,
+		"CERTIFICATE_UNTRUSTED":           7,
+		"CERTIFICATE_MISSING":             8,
+		"CERTIFICATE_VALIDITY_UNKNOWN":    9,
 	}
 )
 
@@ -166,7 +199,7 @@ func (x Authentication_Status) Number() protoreflect.EnumNumber {
 // The EU digital tachograph system uses a three-level public key infrastructure:
 //
 //	EUR Root Certificate (European Root CA, trusted a priori)
-//	    ↓ verifies signature on
+//	    ↓ verifies signature on (directly, or through an ERCA link certificate)
 //	MSCA Certificate (Member State Certificate Authority)
 //	    ↓ verifies signature on
 //	Equipment Certificate (Card or Vehicle Unit)
@@ -191,7 +224,7 @@ func (x Authentication_Status) Number() protoreflect.EnumNumber {
 // - 128-byte signatures
 //
 // Generation 2 uses:
-// - Elliptic Curve Cryptography (Brainpool curves)
+// - Elliptic Curve Cryptography (Brainpool and NIST curves)
 // - SHA-256, SHA-384, or SHA-512 (curve-dependent)
 // - Variable-length ECDSA signatures in plain format (r || s)
 type Authentication struct {
@@ -201,6 +234,11 @@ type Authentication struct {
 	xxx_hidden_SignatureCreationTime *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=signature_creation_time,json=signatureCreationTime"`
 	xxx_hidden_SignerCertificate     *CertificateInfo       `protobuf:"bytes,4,opt,name=signer_certificate,json=signerCertificate"`
 	xxx_hidden_RootCertificate       *CertificateInfo       `protobuf:"bytes,5,opt,name=root_certificate,json=rootCertificate"`
+	xxx_hidden_CaCertificate         *CertificateInfo       `protobuf:"bytes,6,opt,name=ca_certificate,json=caCertificate"`
+	xxx_hidden_LinkCertificate       *CertificateInfo       `protobuf:"bytes,7,opt,name=link_certificate,json=linkCertificate"`
+	xxx_hidden_Detail                *string                `protobuf:"bytes,8,opt,name=detail"`
+	xxx_hidden_SigningWindowStart    *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=signing_window_start,json=signingWindowStart"`
+	xxx_hidden_SigningWindowEnd      *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=signing_window_end,json=signingWindowEnd"`
 	XXX_raceDetectHookData           protoimpl.RaceDetectHookData
 	XXX_presence                     [1]uint32
 	unknownFields                    protoimpl.UnknownFields
@@ -271,14 +309,52 @@ func (x *Authentication) GetRootCertificate() *CertificateInfo {
 	return nil
 }
 
+func (x *Authentication) GetCaCertificate() *CertificateInfo {
+	if x != nil {
+		return x.xxx_hidden_CaCertificate
+	}
+	return nil
+}
+
+func (x *Authentication) GetLinkCertificate() *CertificateInfo {
+	if x != nil {
+		return x.xxx_hidden_LinkCertificate
+	}
+	return nil
+}
+
+func (x *Authentication) GetDetail() string {
+	if x != nil {
+		if x.xxx_hidden_Detail != nil {
+			return *x.xxx_hidden_Detail
+		}
+		return ""
+	}
+	return ""
+}
+
+func (x *Authentication) GetSigningWindowStart() *timestamppb.Timestamp {
+	if x != nil {
+		return x.xxx_hidden_SigningWindowStart
+	}
+	return nil
+}
+
+func (x *Authentication) GetSigningWindowEnd() *timestamppb.Timestamp {
+	if x != nil {
+		return x.xxx_hidden_SigningWindowEnd
+	}
+	return nil
+}
+
 func (x *Authentication) SetStatus(v Authentication_Status) {
 	x.xxx_hidden_Status = v
-	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 0, 5)
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 0, 10)
 }
 
 func (x *Authentication) SetSignatureAlgorithm(v SignatureAlgorithm) {
 	x.xxx_hidden_SignatureAlgorithm = v
-	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 1, 5)
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 1, 10)
 }
 
 func (x *Authentication) SetSignatureCreationTime(v *timestamppb.Timestamp) {
@@ -291,6 +367,27 @@ func (x *Authentication) SetSignerCertificate(v *CertificateInfo) {
 
 func (x *Authentication) SetRootCertificate(v *CertificateInfo) {
 	x.xxx_hidden_RootCertificate = v
+}
+
+func (x *Authentication) SetCaCertificate(v *CertificateInfo) {
+	x.xxx_hidden_CaCertificate = v
+}
+
+func (x *Authentication) SetLinkCertificate(v *CertificateInfo) {
+	x.xxx_hidden_LinkCertificate = v
+}
+
+func (x *Authentication) SetDetail(v string) {
+	x.xxx_hidden_Detail = &v
+	protoimpl.X.SetPresent(&(x.XXX_presence[0]), 7, 10)
+}
+
+func (x *Authentication) SetSigningWindowStart(v *timestamppb.Timestamp) {
+	x.xxx_hidden_SigningWindowStart = v
+}
+
+func (x *Authentication) SetSigningWindowEnd(v *timestamppb.Timestamp) {
+	x.xxx_hidden_SigningWindowEnd = v
 }
 
 func (x *Authentication) HasStatus() bool {
@@ -328,6 +425,41 @@ func (x *Authentication) HasRootCertificate() bool {
 	return x.xxx_hidden_RootCertificate != nil
 }
 
+func (x *Authentication) HasCaCertificate() bool {
+	if x == nil {
+		return false
+	}
+	return x.xxx_hidden_CaCertificate != nil
+}
+
+func (x *Authentication) HasLinkCertificate() bool {
+	if x == nil {
+		return false
+	}
+	return x.xxx_hidden_LinkCertificate != nil
+}
+
+func (x *Authentication) HasDetail() bool {
+	if x == nil {
+		return false
+	}
+	return protoimpl.X.Present(&(x.XXX_presence[0]), 7)
+}
+
+func (x *Authentication) HasSigningWindowStart() bool {
+	if x == nil {
+		return false
+	}
+	return x.xxx_hidden_SigningWindowStart != nil
+}
+
+func (x *Authentication) HasSigningWindowEnd() bool {
+	if x == nil {
+		return false
+	}
+	return x.xxx_hidden_SigningWindowEnd != nil
+}
+
 func (x *Authentication) ClearStatus() {
 	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 0)
 	x.xxx_hidden_Status = Authentication_STATUS_UNSPECIFIED
@@ -350,6 +482,27 @@ func (x *Authentication) ClearRootCertificate() {
 	x.xxx_hidden_RootCertificate = nil
 }
 
+func (x *Authentication) ClearCaCertificate() {
+	x.xxx_hidden_CaCertificate = nil
+}
+
+func (x *Authentication) ClearLinkCertificate() {
+	x.xxx_hidden_LinkCertificate = nil
+}
+
+func (x *Authentication) ClearDetail() {
+	protoimpl.X.ClearPresent(&(x.XXX_presence[0]), 7)
+	x.xxx_hidden_Detail = nil
+}
+
+func (x *Authentication) ClearSigningWindowStart() {
+	x.xxx_hidden_SigningWindowStart = nil
+}
+
+func (x *Authentication) ClearSigningWindowEnd() {
+	x.xxx_hidden_SigningWindowEnd = nil
+}
+
 type Authentication_builder struct {
 	_ [0]func() // Prevents comparability and use of unkeyed literals for the builder.
 
@@ -359,16 +512,39 @@ type Authentication_builder struct {
 	// The cryptographic algorithm used for the data signature.
 	// Determined by the equipment certificate type and generation.
 	SignatureAlgorithm *SignatureAlgorithm
-	// The timestamp when the signature was created, extracted from the
-	// signing certificate's validity period or signature metadata.
+	// The known signing time the certificates' validity was judged at: a
+	// vehicle unit download's overview current date and time, once the
+	// overview's own signature verifies. Unset when nothing dated the signing,
+	// and for a card download, which doesn't record when the card signed; see
+	// signing_window_start and signing_window_end.
 	SignatureCreationTime *timestamppb.Timestamp
 	// Information about the equipment certificate (Card or VU certificate)
 	// that was used to sign this data block. This is the leaf certificate
 	// in the chain, issued by the MSCA.
 	SignerCertificate *CertificateInfo
-	// Information about the European Root CA certificate that anchors the
-	// trust chain. This certificate is trusted a priori per the regulation.
+	// Information about the trusted European Root CA certificate that anchors
+	// the chain. For generation 1, the ERCA public key, whose key identifier is
+	// both its CHR and its CAR.
 	RootCertificate *CertificateInfo
+	// Information about the Member State CA certificate that issued the signer
+	// certificate.
+	CaCertificate *CertificateInfo
+	// Information about the ERCA link certificate the chain passed through: the
+	// root in root_certificate certifies, with it, the newer root that issued
+	// the MSCA certificate. Unset when the MSCA certificate names a trusted root.
+	LinkCertificate *CertificateInfo
+	// Why the status is not VERIFIED, in words. Unset when it is.
+	Detail *string
+	// Start of the window in which a card download can have been signed: the
+	// later of the newest timestamp in the card's signed activity and event data
+	// and, for generation 2, its signing certificate's effective date, since a
+	// card signs nothing before it is personalised. Unset when the start is
+	// unknown (a generation 1 card without timestamps) and for a vehicle unit
+	// download, which has a signature_creation_time.
+	SigningWindowStart *timestamppb.Timestamp
+	// End of a card download's signing window: the time the file was received.
+	// Unset for a vehicle unit download.
+	SigningWindowEnd *timestamppb.Timestamp
 }
 
 func (b0 Authentication_builder) Build() *Authentication {
@@ -376,16 +552,24 @@ func (b0 Authentication_builder) Build() *Authentication {
 	b, x := &b0, m0
 	_, _ = b, x
 	if b.Status != nil {
-		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 0, 5)
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 0, 10)
 		x.xxx_hidden_Status = *b.Status
 	}
 	if b.SignatureAlgorithm != nil {
-		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 1, 5)
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 1, 10)
 		x.xxx_hidden_SignatureAlgorithm = *b.SignatureAlgorithm
 	}
 	x.xxx_hidden_SignatureCreationTime = b.SignatureCreationTime
 	x.xxx_hidden_SignerCertificate = b.SignerCertificate
 	x.xxx_hidden_RootCertificate = b.RootCertificate
+	x.xxx_hidden_CaCertificate = b.CaCertificate
+	x.xxx_hidden_LinkCertificate = b.LinkCertificate
+	if b.Detail != nil {
+		protoimpl.X.SetPresentNonAtomic(&(x.XXX_presence[0]), 7, 10)
+		x.xxx_hidden_Detail = b.Detail
+	}
+	x.xxx_hidden_SigningWindowStart = b.SigningWindowStart
+	x.xxx_hidden_SigningWindowEnd = b.SigningWindowEnd
 	return m0
 }
 
@@ -396,18 +580,12 @@ func (b0 Authentication_builder) Build() *Authentication {
 // - Section 3: RSA certificates (Generation 1)
 // - Section 9: ECC certificates (Generation 2)
 //
-// This message contains human-readable information extracted from the
-// certificate's Common Name (CN) fields and validity period.
-//
 // In the context of an Authentication message:
-//   - signer_certificate: Information about the equipment certificate (Card or VU)
-//     that signed the data. This is the leaf certificate in the chain.
-//   - root_certificate: Information about the European Root CA certificate that
-//     anchors the trust chain.
-//
-// Note: The intermediate MSCA (Member State Certificate Authority) certificate
-// is validated during authentication but its information is not included in
-// the Authentication result.
+//   - signer_certificate: the equipment certificate (Card or VU) that signed
+//     the data, the leaf of the chain.
+//   - ca_certificate: the Member State CA certificate that issued it.
+//   - link_certificate: the ERCA link certificate, when the chain needs one.
+//   - root_certificate: the trusted European Root CA certificate.
 type CertificateInfo struct {
 	state                                      protoimpl.MessageState `protogen:"opaque.v1"`
 	xxx_hidden_Description                     *string                `protobuf:"bytes,1,opt,name=description"`
@@ -637,21 +815,18 @@ type CertificateInfo_builder struct {
 	// Human-readable name of the issuing nation.
 	// Derived from nation_code using the alpha code mapping.
 	NationName *string
-	// Certification Authority Reference from the certificate.
-	// Identifies the CA that issued this certificate.
-	// For equipment certificates: the MSCA reference
-	// For MSCA certificates: the EUR root reference
+	// Certification Authority Reference from the certificate: the CHR of the
+	// CA that issued it, as the decimal string of its 8 bytes.
 	CertificationAuthorityReference *string
-	// Certificate Holder Reference from the certificate.
-	// Uniquely identifies the entity that holds this certificate.
-	// For equipment certificates: the card/VU serial number
-	// For MSCA certificates: the Member State identifier
+	// Certificate Holder Reference from the certificate, as the decimal string
+	// of its 8 bytes. For equipment certificates: the card/VU serial number.
+	// For CA certificates: the Member State or ERCA key identifier.
 	CertificateHolderReference *string
-	// Start of the certificate's validity period.
-	// Certificates used before this time are invalid.
+	// Start of the certificate's validity period. Unset for generation 1
+	// certificates, which carry none.
 	ValidFrom *timestamppb.Timestamp
-	// End of the certificate's validity period.
-	// Certificates used after this time are invalid.
+	// End of the certificate's validity period. Unset when a generation 1
+	// certificate's end of validity is 'FF' padded.
 	ValidTo *timestamppb.Timestamp
 }
 
@@ -688,18 +863,30 @@ var File_wayplatform_connect_tachograph_security_v1_authentication_proto protore
 
 const file_wayplatform_connect_tachograph_security_v1_authentication_proto_rawDesc = "" +
 	"\n" +
-	"?wayplatform/connect/tachograph/security/v1/authentication.proto\x12*wayplatform.connect.tachograph.security.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf5\x04\n" +
+	"?wayplatform/connect/tachograph/security/v1/authentication.proto\x12*wayplatform.connect.tachograph.security.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x86\t\n" +
 	"\x0eAuthentication\x12Y\n" +
 	"\x06status\x18\x01 \x01(\x0e2A.wayplatform.connect.tachograph.security.v1.Authentication.StatusR\x06status\x12o\n" +
 	"\x13signature_algorithm\x18\x02 \x01(\x0e2>.wayplatform.connect.tachograph.security.v1.SignatureAlgorithmR\x12signatureAlgorithm\x12R\n" +
 	"\x17signature_creation_time\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x15signatureCreationTime\x12j\n" +
 	"\x12signer_certificate\x18\x04 \x01(\v2;.wayplatform.connect.tachograph.security.v1.CertificateInfoR\x11signerCertificate\x12f\n" +
-	"\x10root_certificate\x18\x05 \x01(\v2;.wayplatform.connect.tachograph.security.v1.CertificateInfoR\x0frootCertificate\"o\n" +
+	"\x10root_certificate\x18\x05 \x01(\v2;.wayplatform.connect.tachograph.security.v1.CertificateInfoR\x0frootCertificate\x12b\n" +
+	"\x0eca_certificate\x18\x06 \x01(\v2;.wayplatform.connect.tachograph.security.v1.CertificateInfoR\rcaCertificate\x12f\n" +
+	"\x10link_certificate\x18\a \x01(\v2;.wayplatform.connect.tachograph.security.v1.CertificateInfoR\x0flinkCertificate\x12\x16\n" +
+	"\x06detail\x18\b \x01(\tR\x06detail\x12L\n" +
+	"\x14signing_window_start\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x12signingWindowStart\x12H\n" +
+	"\x12signing_window_end\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\x10signingWindowEnd\"\x83\x02\n" +
 	"\x06Status\x12\x16\n" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\f\n" +
 	"\bVERIFIED\x10\x01\x12\x1a\n" +
 	"\x16DATA_SIGNATURE_INVALID\x10\x02\x12#\n" +
-	"\x1fCERTIFICATE_VERIFICATION_FAILED\x10\x03\"\xf5\x02\n" +
+	"\x1fCERTIFICATE_VERIFICATION_FAILED\x10\x03\x12\f\n" +
+	"\bUNSIGNED\x10\x04\x12\x15\n" +
+	"\x11SIGNATURE_MISSING\x10\x05\x12\x17\n" +
+	"\x13CERTIFICATE_REVOKED\x10\x06\x12\x19\n" +
+	"\x15CERTIFICATE_UNTRUSTED\x10\a\x12\x17\n" +
+	"\x13CERTIFICATE_MISSING\x10\b\x12 \n" +
+	"\x1cCERTIFICATE_VALIDITY_UNKNOWN\x10\t\"\xf5\x02\n" +
 	"\x0fCertificateInfo\x12 \n" +
 	"\vdescription\x18\x01 \x01(\tR\vdescription\x12\x1f\n" +
 	"\vnation_code\x18\x02 \x01(\x05R\n" +
@@ -729,18 +916,22 @@ var file_wayplatform_connect_tachograph_security_v1_authentication_proto_goTypes
 	(*timestamppb.Timestamp)(nil), // 4: google.protobuf.Timestamp
 }
 var file_wayplatform_connect_tachograph_security_v1_authentication_proto_depIdxs = []int32{
-	1, // 0: wayplatform.connect.tachograph.security.v1.Authentication.status:type_name -> wayplatform.connect.tachograph.security.v1.Authentication.Status
-	0, // 1: wayplatform.connect.tachograph.security.v1.Authentication.signature_algorithm:type_name -> wayplatform.connect.tachograph.security.v1.SignatureAlgorithm
-	4, // 2: wayplatform.connect.tachograph.security.v1.Authentication.signature_creation_time:type_name -> google.protobuf.Timestamp
-	3, // 3: wayplatform.connect.tachograph.security.v1.Authentication.signer_certificate:type_name -> wayplatform.connect.tachograph.security.v1.CertificateInfo
-	3, // 4: wayplatform.connect.tachograph.security.v1.Authentication.root_certificate:type_name -> wayplatform.connect.tachograph.security.v1.CertificateInfo
-	4, // 5: wayplatform.connect.tachograph.security.v1.CertificateInfo.valid_from:type_name -> google.protobuf.Timestamp
-	4, // 6: wayplatform.connect.tachograph.security.v1.CertificateInfo.valid_to:type_name -> google.protobuf.Timestamp
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	1,  // 0: wayplatform.connect.tachograph.security.v1.Authentication.status:type_name -> wayplatform.connect.tachograph.security.v1.Authentication.Status
+	0,  // 1: wayplatform.connect.tachograph.security.v1.Authentication.signature_algorithm:type_name -> wayplatform.connect.tachograph.security.v1.SignatureAlgorithm
+	4,  // 2: wayplatform.connect.tachograph.security.v1.Authentication.signature_creation_time:type_name -> google.protobuf.Timestamp
+	3,  // 3: wayplatform.connect.tachograph.security.v1.Authentication.signer_certificate:type_name -> wayplatform.connect.tachograph.security.v1.CertificateInfo
+	3,  // 4: wayplatform.connect.tachograph.security.v1.Authentication.root_certificate:type_name -> wayplatform.connect.tachograph.security.v1.CertificateInfo
+	3,  // 5: wayplatform.connect.tachograph.security.v1.Authentication.ca_certificate:type_name -> wayplatform.connect.tachograph.security.v1.CertificateInfo
+	3,  // 6: wayplatform.connect.tachograph.security.v1.Authentication.link_certificate:type_name -> wayplatform.connect.tachograph.security.v1.CertificateInfo
+	4,  // 7: wayplatform.connect.tachograph.security.v1.Authentication.signing_window_start:type_name -> google.protobuf.Timestamp
+	4,  // 8: wayplatform.connect.tachograph.security.v1.Authentication.signing_window_end:type_name -> google.protobuf.Timestamp
+	4,  // 9: wayplatform.connect.tachograph.security.v1.CertificateInfo.valid_from:type_name -> google.protobuf.Timestamp
+	4,  // 10: wayplatform.connect.tachograph.security.v1.CertificateInfo.valid_to:type_name -> google.protobuf.Timestamp
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_wayplatform_connect_tachograph_security_v1_authentication_proto_init() }

@@ -46,8 +46,9 @@ Binary (.DDD)
   interpretation)
 - **Parse/Unparse** — `RawFile` ↔ `File` (semantic interpretation, generation
   dispatch)
-- **Authenticate** — operates on `RawFile` (before parse), populates
-  `Authentication` fields
+- **Authenticate** — operates on `RawFile` (before parse), sets an
+  `Authentication` on every record against an explicit trust store
+  (`CertificateResolver`) and receipt time (`ReceivedAt`)
 - **Anonymize** — operates on `File` (after parse), replaces PII with
   deterministic test values
 
@@ -60,12 +61,14 @@ internal/
   card/                # driver card TLV parsing/marshalling
   vu/                  # vehicle unit TV parsing/marshalling
   security/            # RSA/ECC certificate and signature verification
-  cert/                # certificate resolution (embedded + remote)
+  cert/certcache/      # embedded ERCA Gen1 key and Gen2 root, fetched MSCA cache
+  trust/               # trust store (roots, links, revocations) and chain policy
   brainpool/           # Brainpool elliptic curves (Gen2)
   hexdump/             # hexdump ↔ binary conversion (test fixtures)
 proto/                 # protobuf schemas + generated Go code
 cmd/tachograph/        # CLI (cobra + charmbracelet/fang)
 tools/                 # fetch-certs tool
+tachographtest/        # generated test PKIs; signs VU and card downloads for tests
 ```
 
 ## Architecture Patterns

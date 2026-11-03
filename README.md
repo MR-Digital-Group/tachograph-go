@@ -21,8 +21,8 @@ if err != nil {
     log.Fatalf("failed to unmarshal: %v", err)
 }
 
-// 2. Authenticate the signatures within the RawFile.
-authenticatedRawFile, err := tachograph.Authenticate(context.Background(), rawFile)
+// 2. Authenticate the signatures within the RawFile against the embedded ERCA roots.
+authenticatedRawFile, err := tachograph.Authenticate(context.Background(), rawFile, time.Now())
 if err != nil {
     log.Fatalf("failed to authenticate: %v", err)
 }
@@ -52,7 +52,13 @@ if err != nil {
 
 ### Authenticating
 
-[`tachograph.Authenticate`](https://pkg.go.dev/github.com/way-platform/tachograph-go#Authenticate) cryptographically verifies the signatures within a [`tachographv1.RawFile`](https://pkg.go.dev/github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/v1#RawFile).
+[`tachograph.AuthenticateOptions`](https://pkg.go.dev/github.com/way-platform/tachograph-go#AuthenticateOptions) verifies a [`tachographv1.RawFile`](https://pkg.go.dev/github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/v1#RawFile) and sets an `Authentication` on every record: `VERIFIED`, `UNSIGNED` for records the regulation leaves unsigned, or why the record isn't verified (`DATA_SIGNATURE_INVALID`, `SIGNATURE_MISSING`, `CERTIFICATE_VERIFICATION_FAILED`, `CERTIFICATE_REVOKED`, `CERTIFICATE_UNTRUSTED`, `CERTIFICATE_MISSING`, `CERTIFICATE_VALIDITY_UNKNOWN`), with the chain's certificates, a VU's signing time or a card's signing window, and a `detail`. It returns an error only for input it can't process.
+
+- `CertificateResolver` is required. [`NewCertificateResolver`](https://pkg.go.dev/github.com/way-platform/tachograph-go#NewCertificateResolver) builds one from the ERCA keys, root and link certificates and revoked MSCA certificates JRC publishes; [`DefaultCertificateResolver`](https://pkg.go.dev/github.com/way-platform/tachograph-go#DefaultCertificateResolver) trusts the ERCA Gen1 key and Gen2(1) root embedded in the library. Verification never uses the network.
+- `ReceivedAt` is required: a VU download's overview may be signed at most a day later, and a card download's signing window ends at it. A card's certificate valid for only part of that window is `CERTIFICATE_VALIDITY_UNKNOWN`, and so is every other transfer of a VU download whose overview signature, which covers its signing time, doesn't verify.
+- A revoked MSCA certificate is listed as JRC publishes it and revokes its CHR, which a chain reports once the MSCA certificate has verified.
+
+The [`tachographtest`](https://pkg.go.dev/github.com/way-platform/tachograph-go/tachographtest) package generates test PKIs and signs VU and card downloads with them, for tests.
 
 ### Parsing
 

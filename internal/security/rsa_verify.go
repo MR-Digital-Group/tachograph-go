@@ -5,7 +5,11 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/big"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	securityv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/security/v1"
 )
@@ -194,26 +198,30 @@ func verifyRsaCertificate(cert *securityv1.RsaCertificate, caModulus, caExponent
 		idxModulus  = 28
 		idxExponent = 156
 		lenCAR      = 8
+		lenCHA      = 7
 		lenEOV      = 4
 		lenCHR      = 8
 		lenModulus  = 128
 		lenExponent = 8
 	)
 
-	// Extract CAR
-	// Note: CAR inside C' should match CAR' at the end of the certificate,
-	// but we don't enforce this check as it doesn't affect signature validity
+	// The CAR inside C' must repeat the trailing CAR' (Appendix 11 part A, 3.3).
 	car := binary.BigEndian.Uint64(cPrime[idxCAR : idxCAR+lenCAR])
+	if car != carPrime {
+		cert.SetSignatureValid(false)
+		return fmt.Errorf("CAR %d inside the certificate differs from CAR' %d", car, carPrime)
+	}
 	carStr := fmt.Sprintf("%d", car)
 
 	// Extract CHR
 	chr := binary.BigEndian.Uint64(cPrime[idxCHR : idxCHR+lenCHR])
 	chrStr := fmt.Sprintf("%d", chr)
 
-	// Extract EOV (End Of Validity)
-	// If parsing fails (e.g., 0xFFFFFFFF indicating no expiry), we continue anyway
-	eovBytes := cPrime[idxEOV : idxEOV+lenEOV]
-	eov, _ := unmarshalTimeReal(eovBytes)
+	// Extract EOV (End Of Validity): only 'FF FF FF FF' means unused, zero is 1970-01-01.
+	var eov *timestamppb.Timestamp
+	if seconds := binary.BigEndian.Uint32(cPrime[idxEOV : idxEOV+lenEOV]); seconds != math.MaxUint32 {
+		eov = timestamppb.New(time.Unix(int64(seconds), 0))
+	}
 
 	// Extract RSA public key
 	certModulus := cPrime[idxModulus : idxModulus+lenModulus]
@@ -223,6 +231,7 @@ func verifyRsaCertificate(cert *securityv1.RsaCertificate, caModulus, caExponent
 	cert.SetSignatureValid(true)
 	cert.SetCertificateHolderReference(chrStr)
 	cert.SetCertificateAuthorityReference(carStr)
+	cert.SetCertificateHolderAuthorisation(bytes.Clone(cPrime[idxCHA : idxCHA+lenCHA]))
 	if eov != nil {
 		cert.SetEndOfValidity(eov)
 	}

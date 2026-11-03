@@ -16,7 +16,7 @@ import "google/protobuf/timestamp.proto";
 // The EU digital tachograph system uses a three-level public key infrastructure:
 //
 //     EUR Root Certificate (European Root CA, trusted a priori)
-//         ↓ verifies signature on
+//         ↓ verifies signature on (directly, or through an ERCA link certificate)
 //     MSCA Certificate (Member State Certificate Authority)
 //         ↓ verifies signature on
 //     Equipment Certificate (Card or Vehicle Unit)
@@ -41,7 +41,7 @@ import "google/protobuf/timestamp.proto";
 // - 128-byte signatures
 //
 // Generation 2 uses:
-// - Elliptic Curve Cryptography (Brainpool curves)
+// - Elliptic Curve Cryptography (Brainpool and NIST curves)
 // - SHA-256, SHA-384, or SHA-512 (curve-dependent)
 // - Variable-length ECDSA signatures in plain format (r || s)
 message Authentication {
@@ -53,8 +53,11 @@ message Authentication {
   // Determined by the equipment certificate type and generation.
   SignatureAlgorithm signature_algorithm = 2;
 
-  // The timestamp when the signature was created, extracted from the
-  // signing certificate's validity period or signature metadata.
+  // The known signing time the certificates' validity was judged at: a
+  // vehicle unit download's overview current date and time, once the
+  // overview's own signature verifies. Unset when nothing dated the signing,
+  // and for a card download, which doesn't record when the card signed; see
+  // signing_window_start and signing_window_end.
   google.protobuf.Timestamp signature_creation_time = 3;
 
   // Information about the equipment certificate (Card or VU certificate)
@@ -62,9 +65,34 @@ message Authentication {
   // in the chain, issued by the MSCA.
   CertificateInfo signer_certificate = 4;
 
-  // Information about the European Root CA certificate that anchors the
-  // trust chain. This certificate is trusted a priori per the regulation.
+  // Information about the trusted European Root CA certificate that anchors
+  // the chain. For generation 1, the ERCA public key, whose key identifier is
+  // both its CHR and its CAR.
   CertificateInfo root_certificate = 5;
+
+  // Information about the Member State CA certificate that issued the signer
+  // certificate.
+  CertificateInfo ca_certificate = 6;
+
+  // Information about the ERCA link certificate the chain passed through: the
+  // root in root_certificate certifies, with it, the newer root that issued
+  // the MSCA certificate. Unset when the MSCA certificate names a trusted root.
+  CertificateInfo link_certificate = 7;
+
+  // Why the status is not VERIFIED, in words. Unset when it is.
+  string detail = 8;
+
+  // Start of the window in which a card download can have been signed: the
+  // later of the newest timestamp in the card's signed activity and event data
+  // and, for generation 2, its signing certificate's effective date, since a
+  // card signs nothing before it is personalised. Unset when the start is
+  // unknown (a generation 1 card without timestamps) and for a vehicle unit
+  // download, which has a signature_creation_time.
+  google.protobuf.Timestamp signing_window_start = 9;
+
+  // End of a card download's signing window: the time the file was received.
+  // Unset for a vehicle unit download.
+  google.protobuf.Timestamp signing_window_end = 10;
 
   // Authentication verification status.
   enum Status {
@@ -81,12 +109,39 @@ message Authentication {
     // the data, suggesting data corruption or tampering after signing.
     DATA_SIGNATURE_INVALID = 2;
 
-    // Certificate verification failed. This can occur if:
-    // - A required certificate (MSCA or equipment) cannot be found
-    // - A certificate signature is invalid
-    // - A certificate has expired or is not yet valid
-    // - The certificate chain is broken
+    // A certificate in the chain failed: its signature, its issuer reference
+    // (CAR), its holder authorisation (role) or its validity when it was used.
+    // A card's signing certificate fails when it was valid at no time of the
+    // signing window.
     CERTIFICATE_VERIFICATION_FAILED = 3;
+
+    // The regulation leaves this record unsigned: the vehicle unit's download
+    // interface version and card download transfers, and a card's EF_ICC,
+    // EF_IC, EF_Card_Download and certificate files.
+    UNSIGNED = 4;
+
+    // The regulation signs this record, but the file holds no signature for
+    // it, or an all-zero one.
+    SIGNATURE_MISSING = 5;
+
+    // The chain's MSCA certificate verifies under its issuer, and the trust
+    // store marks its CHR revoked.
+    CERTIFICATE_REVOKED = 6;
+
+    // No trusted root or ERCA link certificate leads to the MSCA certificate.
+    CERTIFICATE_UNTRUSTED = 7;
+
+    // The file holds no certificates for this record: a vehicle unit download
+    // without an overview, or a card download without its certificate files.
+    CERTIFICATE_MISSING = 8;
+
+    // The certificates verify, but their validity when the data was signed
+    // can't be established: a card's signing certificate was valid for only
+    // part of the window in which the card can have signed, or a vehicle unit
+    // download's overview, whose signed current date and time dates the
+    // download, doesn't verify. A record whose own signature fails is
+    // DATA_SIGNATURE_INVALID instead.
+    CERTIFICATE_VALIDITY_UNKNOWN = 9;
   }
 }
 
@@ -132,18 +187,12 @@ enum SignatureAlgorithm {
 // - Section 3: RSA certificates (Generation 1)
 // - Section 9: ECC certificates (Generation 2)
 //
-// This message contains human-readable information extracted from the
-// certificate's Common Name (CN) fields and validity period.
-//
 // In the context of an Authentication message:
-// - signer_certificate: Information about the equipment certificate (Card or VU)
-//   that signed the data. This is the leaf certificate in the chain.
-// - root_certificate: Information about the European Root CA certificate that
-//   anchors the trust chain.
-//
-// Note: The intermediate MSCA (Member State Certificate Authority) certificate
-// is validated during authentication but its information is not included in
-// the Authentication result.
+// - signer_certificate: the equipment certificate (Card or VU) that signed
+//   the data, the leaf of the chain.
+// - ca_certificate: the Member State CA certificate that issued it.
+// - link_certificate: the ERCA link certificate, when the chain needs one.
+// - root_certificate: the trusted European Root CA certificate.
 message CertificateInfo {
   // Human-readable description of the certificate holder.
   // Extracted from the certificate's Common Name field.
@@ -158,23 +207,20 @@ message CertificateInfo {
   // Derived from nation_code using the alpha code mapping.
   string nation_name = 3;
 
-  // Certification Authority Reference from the certificate.
-  // Identifies the CA that issued this certificate.
-  // For equipment certificates: the MSCA reference
-  // For MSCA certificates: the EUR root reference
+  // Certification Authority Reference from the certificate: the CHR of the
+  // CA that issued it, as the decimal string of its 8 bytes.
   string certification_authority_reference = 4;
 
-  // Certificate Holder Reference from the certificate.
-  // Uniquely identifies the entity that holds this certificate.
-  // For equipment certificates: the card/VU serial number
-  // For MSCA certificates: the Member State identifier
+  // Certificate Holder Reference from the certificate, as the decimal string
+  // of its 8 bytes. For equipment certificates: the card/VU serial number.
+  // For CA certificates: the Member State or ERCA key identifier.
   string certificate_holder_reference = 5;
 
-  // Start of the certificate's validity period.
-  // Certificates used before this time are invalid.
+  // Start of the certificate's validity period. Unset for generation 1
+  // certificates, which carry none.
   google.protobuf.Timestamp valid_from = 6;
 
-  // End of the certificate's validity period.
-  // Certificates used after this time are invalid.
+  // End of the certificate's validity period. Unset when a generation 1
+  // certificate's end of validity is 'FF' padded.
   google.protobuf.Timestamp valid_to = 7;
 }

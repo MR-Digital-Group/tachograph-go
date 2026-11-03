@@ -6,6 +6,12 @@ import (
 	vuv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/vu/v1"
 )
 
+// Record types of Gen2 record arrays (Data Dictionary 2.120).
+const (
+	recordTypeSignature = 0x08
+	recordTypeVuCard    = 0x0E
+)
+
 // ===== sizeOf Functions =====
 
 // sizeOfTechnicalData dispatches to generation-specific size calculation.
@@ -13,10 +19,8 @@ func sizeOfTechnicalData(data []byte, transferType vuv1.TransferType) (totalSize
 	switch transferType {
 	case vuv1.TransferType_TECHNICAL_DATA_GEN1:
 		return sizeOfTechnicalDataGen1(data)
-	case vuv1.TransferType_TECHNICAL_DATA_GEN2_V1:
-		return sizeOfTechnicalDataGen2V1(data)
-	case vuv1.TransferType_TECHNICAL_DATA_GEN2_V2:
-		return sizeOfTechnicalDataGen2V2(data)
+	case vuv1.TransferType_TECHNICAL_DATA_GEN2_V1, vuv1.TransferType_TECHNICAL_DATA_GEN2_V2:
+		return sizeOfTechnicalDataGen2(data)
 	default:
 		return 0, 0, fmt.Errorf("unsupported transfer type for TechnicalData: %v", transferType)
 	}
@@ -89,103 +93,27 @@ func sizeOfTechnicalDataGen1(data []byte) (totalSize, signatureSize int, err err
 	return offset, gen1SignatureSize, nil
 }
 
-// sizeOfTechnicalDataGen2V1 calculates size by parsing all Gen2 V1 RecordArrays.
-//
-// Per the regulation (Appendix 7, Section 2.2.6.6, TREP 25), Gen2 V1 Technical Data
-// contains up to 8 RecordArrays:
-//
-//	VuIdentificationRecordArray              (recordType 0x19)
-//	VuSensorPairedRecordArray                (recordType 0x20)
-//	VuSensorExternalGNSSCoupledRecordArray   (recordType 0x21)
-//	VuCalibrationRecordArray                 (recordType 0x0c)
-//	VuCardRecordArray                        (recordType 0x0e)
-//	VuITSConsentRecordArray                  (recordType 0x17)
-//	VuPowerSupplyInterruptionRecordArray     (recordType 0x1f)
-//	SignatureRecordArray                     (recordType 0x08)
-//
-// We iterate through all present RecordArrays until we find the Signature (always last).
-func sizeOfTechnicalDataGen2V1(data []byte) (totalSize, signatureSize int, err error) {
+// sizeOfTechnicalDataGen2 sizes Gen2 technical data, TREP 25 and 35: record arrays up to the
+// SignatureRecordArray that ends the transfer. Appendix 7 lists identification, sensor pairings,
+// external GNSS couplings, calibrations, card records, ITS consents and power supply
+// interruptions before it.
+func sizeOfTechnicalDataGen2(data []byte) (totalSize, signatureSize int, err error) {
 	offset := 0
-
-	const recordTypeSignature = 0x08
-
-	// Each iteration advances by at least 5 bytes (the RecordArray header size),
-	// so the loop is guaranteed to terminate when offset exceeds len(data).
+	// Each iteration advances by at least the 5-byte header, so the loop ends.
 	for {
 		if offset+5 > len(data) {
 			return 0, 0, fmt.Errorf("ran out of data before finding SignatureRecordArray at offset %d", offset)
 		}
-
 		recordType := data[offset]
 		size, sizeErr := sizeOfRecordArray(data, offset)
 		if sizeErr != nil {
 			return 0, 0, fmt.Errorf("RecordArray at offset %d (type 0x%02x): %w", offset, recordType, sizeErr)
 		}
-
+		offset += size
 		if recordType == recordTypeSignature {
-			offset += size
 			return offset, size, nil
 		}
-
-		offset += size
 	}
-}
-
-// sizeOfTechnicalDataGen2V2 calculates size by parsing all Gen2 V2 RecordArrays.
-func sizeOfTechnicalDataGen2V2(data []byte) (totalSize, signatureSize int, err error) {
-	offset := 0
-
-	// VuIdentificationRecordArray
-	size, sizeErr := sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuIdentificationRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// SensorPairedRecordArray
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SensorPairedRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// SensorExternalGNSSCoupledRecordArray (Gen2 V2+)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SensorExternalGNSSCoupledRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// VuCalibrationRecordArray
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuCalibrationRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// VuITSConsentRecordArray (Gen2 V2+)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuITSConsentRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// VuPowerSupplyInterruptionRecordArray (Gen2 V2+)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("VuPowerSupplyInterruptionRecordArray: %w", sizeErr)
-	}
-	offset += size
-
-	// SignatureRecordArray (last)
-	size, sizeErr = sizeOfRecordArray(data, offset)
-	if sizeErr != nil {
-		return 0, 0, fmt.Errorf("SignatureRecordArray: %w", sizeErr)
-	}
-	signatureSizeGen2 := size
-	offset += size
-
-	return offset, signatureSizeGen2, nil
 }
 
 // AppendVuTechnicalData appends VU technical data to a buffer.

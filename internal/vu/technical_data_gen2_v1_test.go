@@ -118,7 +118,7 @@ func TestTechnicalDataGen2V1ReadsTheWholeLayout(t *testing.T) {
 	signature := array(0x08, 64, make([]byte, 64))
 	value := slices.Concat(data, signature)
 
-	total, signatureSize, err := sizeOfTechnicalDataGen2V1(value)
+	total, signatureSize, err := sizeOfTechnicalDataGen2(value)
 	if err != nil {
 		t.Fatalf("size: %v", err)
 	}

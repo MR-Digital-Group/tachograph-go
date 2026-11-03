@@ -1,13 +1,17 @@
 package vu
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
+	"sync"
+	"time"
 
-	"github.com/way-platform/tachograph-go/internal/cert"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/way-platform/tachograph-go/internal/security"
+	"github.com/way-platform/tachograph-go/internal/trust"
 	ddv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/dd/v1"
 	securityv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/security/v1"
 	vuv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/vu/v1"
@@ -15,409 +19,232 @@ import (
 
 // AuthenticateOptions configures the VU authentication process.
 type AuthenticateOptions struct {
-	// CertificateResolver is used to resolve CA certificates by their Certificate Authority Reference (CAR).
-	CertificateResolver cert.Resolver
+	// CertificateResolver supplies the trusted roots, link certificates and revocations.
+	CertificateResolver trust.Resolver
+	// ReceivedAt is when the download was received; its overview may be signed at most a day later.
+	ReceivedAt time.Time
 }
 
-// AuthenticateRawVehicleUnitFile performs cryptographic authentication on all records
-// in a raw vehicle unit file. For each record, it verifies the signature against the
-// data and populates the authentication field.
-//
-// This function mutates the rawFile parameter by setting the authentication field
-// on each record.
-//
-// Authentication is performed by:
-// 1. Extracting the equipment certificate from the appropriate transfer type
-// 2. Verifying the certificate chain against the European Root CA
-// 3. Verifying the data signature using the equipment certificate
-//
-// If any record fails authentication, its authentication.status will be set to the
-// appropriate error status, and this function will return an error after processing
-// all records.
-func (opts AuthenticateOptions) AuthenticateRawVehicleUnitFile(ctx context.Context, rawFile *vuv1.RawVehicleUnitFile) error {
-	if rawFile == nil {
-		return fmt.Errorf("rawFile cannot be nil")
-	}
-	if opts.CertificateResolver == nil {
-		opts.CertificateResolver = cert.DefaultResolver()
-	}
+const (
+	lenGen1Certificate = 194
+	// idxGen1CurrentDateTime follows the two certificates, the VIN (17 bytes) and the registration (15 bytes).
+	idxGen1CurrentDateTime = 2*lenGen1Certificate + 17 + 15
+)
 
-	var errs []error
+// vuChain is a generation's certificate chain, verified once per download. It holds the equipment
+// certificate whenever the certificates verify, even when their validity is unknown.
+type vuChain struct {
+	auth *securityv1.Authentication
+	gen1 *securityv1.RsaCertificate
+	gen2 *securityv1.EccCertificate
+}
+
+// AuthenticateRawVehicleUnitFile sets an authentication on every record of rawFile. It fails only
+// when rawFile is nil or the options lack a resolver or a receipt time.
+func (opts AuthenticateOptions) AuthenticateRawVehicleUnitFile(rawFile *vuv1.RawVehicleUnitFile) error {
+	switch {
+	case rawFile == nil:
+		return errors.New("rawFile cannot be nil")
+	case opts.CertificateResolver == nil:
+		return errors.New("a certificate resolver is required")
+	case opts.ReceivedAt.IsZero():
+		return errors.New("the time the download was received is required")
+	}
 	records := rawFile.GetRecords()
-
+	gen1 := sync.OnceValue(func() *vuChain { return opts.gen1Chain(records) })
+	gen2 := sync.OnceValue(func() *vuChain { return opts.gen2Chain(records) })
 	for _, record := range records {
-		if err := opts.authenticateRecord(ctx, record, records); err != nil {
-			errs = append(errs, err)
-			// Continue processing other records even if one fails
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
-// authenticateRecord authenticates a single VU record by verifying its signature
-// against the data. This function mutates the record by setting its authentication field.
-func (opts AuthenticateOptions) authenticateRecord(ctx context.Context, record *vuv1.RawVehicleUnitFile_Record, allRecords []*vuv1.RawVehicleUnitFile_Record) error {
-	generation := record.GetGeneration()
-	transferType := record.GetType()
-
-	// Initialize authentication result
-	auth := &securityv1.Authentication{}
-	record.SetAuthentication(auth)
-
-	// Select authentication strategy based on generation
-	switch generation {
-	case ddv1.Generation_GENERATION_1:
-		return opts.authenticateGen1Record(ctx, record, allRecords, auth)
-	case ddv1.Generation_GENERATION_2:
-		return opts.authenticateGen2Record(ctx, record, allRecords, auth)
-	default:
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("unsupported generation for %v: %v", transferType, generation)
-	}
-}
-
-// authenticateGen1Record authenticates a Generation 1 VU record using RSA signature recovery.
-func (opts AuthenticateOptions) authenticateGen1Record(ctx context.Context, record *vuv1.RawVehicleUnitFile_Record, allRecords []*vuv1.RawVehicleUnitFile_Record, auth *securityv1.Authentication) error {
-	// Step 1: Find the Overview record to get the VU and MSCA certificates
-	overviewRecord := opts.findOverviewRecord(allRecords)
-	if overviewRecord == nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("overview record not found for authentication")
-	}
-
-	// Step 2: Parse the Overview to extract certificates
-	vuCert, mscaCert, err := opts.extractGen1Certificates(overviewRecord)
-	if err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("failed to extract Gen1 certificates: %w", err)
-	}
-
-	// Step 3: Verify certificate chain
-	if err := opts.verifyGen1CertificateChain(ctx, vuCert, mscaCert, auth); err != nil {
-		return err
-	}
-
-	// Step 4: Verify the data signature
-	if err := opts.verifyGen1DataSignature(record, vuCert, auth); err != nil {
-		return err
-	}
-
-	// Authentication succeeded
-	auth.SetStatus(securityv1.Authentication_VERIFIED)
-	auth.SetSignatureAlgorithm(securityv1.SignatureAlgorithm_SHA1_WITH_RSA_ENCRYPTION)
-
-	return nil
-}
-
-// authenticateGen2Record authenticates a Generation 2 VU record using ECDSA signature verification.
-func (opts AuthenticateOptions) authenticateGen2Record(ctx context.Context, record *vuv1.RawVehicleUnitFile_Record, allRecords []*vuv1.RawVehicleUnitFile_Record, auth *securityv1.Authentication) error {
-	// Step 1: Find the Overview record to get the VU and MSCA certificates
-	overviewRecord := opts.findGen2OverviewRecord(allRecords)
-	if overviewRecord == nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("gen2 overview record not found for authentication")
-	}
-
-	// Step 2: Parse the Overview to extract certificates
-	vuCert, mscaCert, err := opts.extractGen2Certificates(overviewRecord)
-	if err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("failed to extract Gen2 certificates: %w", err)
-	}
-
-	// Step 3: Verify certificate chain
-	if err := opts.verifyGen2CertificateChain(ctx, vuCert, mscaCert, auth); err != nil {
-		return err
-	}
-
-	// Step 4: Verify the data signature
-	if err := opts.verifyGen2DataSignature(record, vuCert, auth); err != nil {
-		return err
-	}
-
-	// Authentication succeeded
-	auth.SetStatus(securityv1.Authentication_VERIFIED)
-
-	// Infer signature algorithm from VU certificate's curve
-	if pubKey := vuCert.GetPublicKey(); pubKey != nil {
-		oid := pubKey.GetDomainParametersOid()
-		switch oid {
-		case "1.3.36.3.3.2.8.1.1.7", "1.2.840.10045.3.1.7": // brainpoolP256r1, NIST P-256
-			auth.SetSignatureAlgorithm(securityv1.SignatureAlgorithm_ECDSA_WITH_SHA256)
-		case "1.3.36.3.3.2.8.1.1.11", "1.3.132.0.34": // brainpoolP384r1, NIST P-384
-			auth.SetSignatureAlgorithm(securityv1.SignatureAlgorithm_ECDSA_WITH_SHA384)
-		case "1.3.36.3.3.2.8.1.1.13", "1.3.132.0.35": // brainpoolP512r1, NIST P-521
-			auth.SetSignatureAlgorithm(securityv1.SignatureAlgorithm_ECDSA_WITH_SHA512)
+		switch {
+		case record.GetType() == vuv1.TransferType_DOWNLOAD_INTERFACE_VERSION || record.GetType() == vuv1.TransferType_CARD_DOWNLOAD:
+			record.SetAuthentication(trust.Status(securityv1.Authentication_UNSIGNED, fmt.Sprintf("the regulation leaves %v unsigned", record.GetType())))
+		case record.GetGeneration() == ddv1.Generation_GENERATION_1:
+			record.SetAuthentication(verifyGen1Transfer(record, gen1()))
+		case record.GetGeneration() == ddv1.Generation_GENERATION_2:
+			record.SetAuthentication(verifyGen2Transfer(record, gen2()))
 		default:
-			auth.SetSignatureAlgorithm(securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_UNSPECIFIED)
-		}
-	}
-
-	return nil
-}
-
-// findGen2OverviewRecord finds the first Gen2 Overview record in the file.
-// This record contains the VU and MSCA certificates needed for authentication.
-func (opts AuthenticateOptions) findGen2OverviewRecord(records []*vuv1.RawVehicleUnitFile_Record) *vuv1.RawVehicleUnitFile_Record {
-	for _, rec := range records {
-		transferType := rec.GetType()
-		if transferType == vuv1.TransferType_OVERVIEW_GEN2_V1 || transferType == vuv1.TransferType_OVERVIEW_GEN2_V2 {
-			return rec
+			record.SetAuthentication(trust.Status(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED, fmt.Sprintf("%v has no generation", record.GetType())))
 		}
 	}
 	return nil
 }
 
-// extractGen2Certificates extracts the VU and MSCA ECC certificates from a Gen2 Overview record.
-func (opts AuthenticateOptions) extractGen2Certificates(overviewRecord *vuv1.RawVehicleUnitFile_Record) (*securityv1.EccCertificate, *securityv1.EccCertificate, error) {
-	data, _, err := splitTransferValue(overviewRecord)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to split Overview transfer value: %w", err)
+// findTransfer is the first transfer of one of the given types.
+func findTransfer(records []*vuv1.RawVehicleUnitFile_Record, types ...vuv1.TransferType) *vuv1.RawVehicleUnitFile_Record {
+	for _, record := range records {
+		if slices.Contains(types, record.GetType()) {
+			return record
+		}
 	}
-
-	// Gen2 Overview structure (from regulation):
-	// Both V1 and V2 start with RecordArray structures for certificates:
-	// - MemberStateCertificateRecordArray: 5-byte header + certificate data
-	// - VuCertificateRecordArray: 5-byte header + certificate data
-	//
-	// RecordArray header:
-	// - Byte 0: recordType
-	// - Bytes 1-2: recordSize (big-endian, uint16)
-	// - Bytes 3-4: noOfRecords (big-endian, uint16)
-
-	// Parse MSCA certificate RecordArray
-	if len(data) < 5 {
-		return nil, nil, fmt.Errorf("insufficient data for MSCA RecordArray header")
-	}
-
-	mscaRecordSize := int(binary.BigEndian.Uint16(data[1:3]))
-	mscaNoOfRecords := int(binary.BigEndian.Uint16(data[3:5]))
-
-	if mscaNoOfRecords != 1 {
-		return nil, nil, fmt.Errorf("expected exactly 1 MSCA certificate, got %d", mscaNoOfRecords)
-	}
-
-	mscaArraySize := 5 + mscaRecordSize // header + data
-	if len(data) < mscaArraySize {
-		return nil, nil, fmt.Errorf("insufficient data for MSCA certificate: need %d, have %d", mscaArraySize, len(data))
-	}
-
-	mscaCertData := data[5:mscaArraySize]
-
-	// Parse VU certificate RecordArray
-	vuArrayStart := mscaArraySize
-	if len(data) < vuArrayStart+5 {
-		return nil, nil, fmt.Errorf("insufficient data for VU RecordArray header")
-	}
-
-	vuRecordSize := int(binary.BigEndian.Uint16(data[vuArrayStart+1 : vuArrayStart+3]))
-	vuNoOfRecords := int(binary.BigEndian.Uint16(data[vuArrayStart+3 : vuArrayStart+5]))
-
-	if vuNoOfRecords != 1 {
-		return nil, nil, fmt.Errorf("expected exactly 1 VU certificate, got %d", vuNoOfRecords)
-	}
-
-	vuArraySize := 5 + vuRecordSize
-	if len(data) < vuArrayStart+vuArraySize {
-		return nil, nil, fmt.Errorf("insufficient data for VU certificate: need %d, have %d", vuArrayStart+vuArraySize, len(data))
-	}
-
-	vuCertData := data[vuArrayStart+5 : vuArrayStart+vuArraySize]
-
-	// Unmarshal ECC certificates
-	mscaCert, err := security.UnmarshalEccCertificate(mscaCertData)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal MSCA certificate: %w", err)
-	}
-
-	vuCert, err := security.UnmarshalEccCertificate(vuCertData)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal VU certificate: %w", err)
-	}
-
-	return vuCert, mscaCert, nil
-}
-
-// verifyGen2CertificateChain verifies the Gen2 certificate chain: EUR Root (ECC) -> MSCA (ECC) -> VU (ECC)
-func (opts AuthenticateOptions) verifyGen2CertificateChain(ctx context.Context, vuCert *securityv1.EccCertificate, mscaCert *securityv1.EccCertificate, auth *securityv1.Authentication) error {
-	// Get Gen2 ECC root certificate
-	rootCert, err := opts.CertificateResolver.GetEccRootCertificate(ctx)
-	if err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("failed to get Gen2 root certificate: %w", err)
-	}
-
-	// Verify MSCA certificate against EUR Gen2 root (both ECC)
-	if err := security.VerifyEccCertificateWithEccRoot(mscaCert, rootCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("MSCA certificate verification failed: %w", err)
-	}
-
-	// Verify VU certificate against MSCA
-	if err := security.VerifyEccCertificateWithCA(vuCert, mscaCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("VU certificate verification failed: %w", err)
-	}
-
 	return nil
 }
 
-// verifyGen2DataSignature verifies the ECDSA signature on the data portion of a Gen2 record.
-func (opts AuthenticateOptions) verifyGen2DataSignature(record *vuv1.RawVehicleUnitFile_Record, vuCert *securityv1.EccCertificate, auth *securityv1.Authentication) error {
+// recordArrayAt reads the record array at offset: its record type, its records and its size with the header.
+func recordArrayAt(data []byte, offset int) (byte, [][]byte, int, error) {
+	recordType, recordSize, noOfRecords, headerSize, err := parseRecordArrayHeader(data, offset)
+	if err != nil {
+		return 0, nil, 0, err
+	}
+	size := headerSize + int(recordSize)*int(noOfRecords)
+	if offset+size > len(data) {
+		return 0, nil, 0, fmt.Errorf("record array at offset %d needs %d bytes, %d remain", offset, size, len(data)-offset)
+	}
+	items := make([][]byte, noOfRecords)
+	for i := range items {
+		start := offset + headerSize + i*int(recordSize)
+		items[i] = data[start : start+int(recordSize)]
+	}
+	return recordType, items, size, nil
+}
+
+// limitSigningTime fails a verified chain whose overview was signed more than a day after the download was received.
+func (opts AuthenticateOptions) limitSigningTime(chain *vuChain, signedAt time.Time) {
+	if chain.auth.GetStatus() != securityv1.Authentication_VERIFIED || !signedAt.After(opts.ReceivedAt.Add(24*time.Hour)) {
+		return
+	}
+	chain.auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
+	chain.auth.SetDetail(fmt.Sprintf("the overview was signed at %s, more than a day after the download was received at %s",
+		signedAt.Format(time.RFC3339), opts.ReceivedAt.UTC().Format(time.RFC3339)))
+	chain.gen1, chain.gen2 = nil, nil
+}
+
+// date verifies a generation's chain at its overview's current date and time, which dates the
+// download only once the overview's own signature verifies under the chain. When that signature
+// fails or is missing, nothing dates the download: every signed transfer of the generation is
+// CERTIFICATE_VALIDITY_UNKNOWN, unless its own signature fails.
+func (opts AuthenticateOptions) date(overview *vuv1.RawVehicleUnitFile_Record, signedAt time.Time,
+	verify func(trust.Window) *vuChain, verifyTransfer func(*vuv1.RawVehicleUnitFile_Record, *vuChain) *securityv1.Authentication,
+) *vuChain {
+	undated := verify(trust.Window{})
+	if undated.gen1 == nil && undated.gen2 == nil {
+		return undated
+	}
+	switch status := verifyTransfer(overview, undated).GetStatus(); status {
+	case securityv1.Authentication_DATA_SIGNATURE_INVALID, securityv1.Authentication_SIGNATURE_MISSING:
+		undated.auth = trust.WithStatus(undated.auth, securityv1.Authentication_CERTIFICATE_VALIDITY_UNKNOWN,
+			fmt.Sprintf("the overview is %v, so its current date and time %s does not date the download", status, signedAt.Format(time.RFC3339)))
+		return undated
+	}
+	chain := verify(trust.At(signedAt))
+	opts.limitSigningTime(chain, signedAt)
+	return chain
+}
+
+// gen1Chain verifies the chain in the Gen1 overview, dated by the overview's current date and time.
+func (opts AuthenticateOptions) gen1Chain(records []*vuv1.RawVehicleUnitFile_Record) *vuChain {
+	overview := findTransfer(records, vuv1.TransferType_OVERVIEW_GEN1)
+	if overview == nil {
+		return &vuChain{auth: trust.Status(securityv1.Authentication_CERTIFICATE_MISSING, "the download has no Gen1 overview, which carries the certificates")}
+	}
+	data, _, err := splitTransferValue(overview)
+	if err != nil || len(data) < idxGen1CurrentDateTime+4 {
+		return &vuChain{auth: trust.Status(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED, "the Gen1 overview is too short for its certificates and current date and time")}
+	}
+	signedAt := time.Unix(int64(binary.BigEndian.Uint32(data[idxGen1CurrentDateTime:])), 0).UTC()
+	return opts.date(overview, signedAt, func(w trust.Window) *vuChain {
+		auth, signer := trust.VerifyGen1Chain(opts.CertificateResolver, data[:lenGen1Certificate], data[lenGen1Certificate:2*lenGen1Certificate], trust.VehicleUnit, w)
+		return &vuChain{auth: auth, gen1: signer}
+	}, verifyGen1Transfer)
+}
+
+// gen2Chain verifies the chain in the Gen2 overview, dated by the overview's current date and time.
+func (opts AuthenticateOptions) gen2Chain(records []*vuv1.RawVehicleUnitFile_Record) *vuChain {
+	overview := findTransfer(records, vuv1.TransferType_OVERVIEW_GEN2_V1, vuv1.TransferType_OVERVIEW_GEN2_V2)
+	if overview == nil {
+		return &vuChain{auth: trust.Status(securityv1.Authentication_CERTIFICATE_MISSING, "the download has no Gen2 overview, which carries the certificates")}
+	}
+	data, _, err := splitTransferValue(overview)
+	if err != nil {
+		return &vuChain{auth: trust.Status(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED, fmt.Sprintf("Gen2 overview: %v", err))}
+	}
+	// The overview opens with the MSCA and VU certificate arrays, then VIN, registration and current date and time.
+	var arrays [5][][]byte
+	offset := 0
+	for i := range arrays {
+		_, items, size, err := recordArrayAt(data, offset)
+		if err != nil {
+			return &vuChain{auth: trust.Status(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED, fmt.Sprintf("Gen2 overview: %v", err))}
+		}
+		arrays[i] = items
+		offset += size
+	}
+	if len(arrays[0]) > 1 || len(arrays[1]) > 1 || len(arrays[4]) != 1 || len(arrays[4][0]) != 4 {
+		return &vuChain{auth: trust.Status(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED, "Gen2 overview: want at most one certificate per array and one 4-byte current date and time")}
+	}
+	signedAt := time.Unix(int64(binary.BigEndian.Uint32(arrays[4][0])), 0).UTC()
+	var msca, equipment []byte
+	if len(arrays[0]) == 1 {
+		msca = arrays[0][0]
+	}
+	if len(arrays[1]) == 1 {
+		equipment = arrays[1][0]
+	}
+	return opts.date(overview, signedAt, func(w trust.Window) *vuChain {
+		auth, signer := trust.VerifyGen2Chain(opts.CertificateResolver, msca, equipment, nil, trust.VehicleUnit, w)
+		return &vuChain{auth: auth, gen2: signer}
+	}, verifyGen2Transfer)
+}
+
+// verifyGen1Transfer verifies a Gen1 transfer's PKCS#1 signature: over the overview's data after
+// its two certificates, over all the data of another transfer (Appendix 7, 2.2.6).
+func verifyGen1Transfer(record *vuv1.RawVehicleUnitFile_Record, chain *vuChain) *securityv1.Authentication {
 	data, signature, err := splitTransferValue(record)
 	if err != nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("failed to split transfer value: %w", err)
+		return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, err.Error())
 	}
-
-	if len(signature) == 0 {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("no signature present in Gen2 record")
+	if trust.Blank(signature) {
+		return trust.WithStatus(chain.auth, securityv1.Authentication_SIGNATURE_MISSING, "the transfer's signature is empty or zeroed")
 	}
-
-	// For Gen2, the signature is over all the data in the transfer
-	// The signature format is plain ECDSA (R || S)
-	if err := security.VerifyEccDataSignature(data, signature, vuCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("data signature verification failed: %w", err)
+	if chain.gen1 == nil {
+		return proto.CloneOf(chain.auth)
 	}
-
-	return nil
-}
-
-// findOverviewRecord finds the first Gen1 Overview record in the file.
-// This record contains the VU and MSCA certificates needed for authentication.
-func (opts AuthenticateOptions) findOverviewRecord(records []*vuv1.RawVehicleUnitFile_Record) *vuv1.RawVehicleUnitFile_Record {
-	for _, rec := range records {
-		if rec.GetType() == vuv1.TransferType_OVERVIEW_GEN1 {
-			return rec
+	if record.GetType() == vuv1.TransferType_OVERVIEW_GEN1 {
+		if len(data) < 2*lenGen1Certificate {
+			return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, "the overview is shorter than its certificates")
 		}
+		data = data[2*lenGen1Certificate:]
 	}
-	return nil
+	if err := security.VerifyRsaDataSignature(data, signature, chain.gen1); err != nil {
+		return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, err.Error())
+	}
+	return proto.CloneOf(chain.auth)
 }
 
-// extractGen1Certificates extracts the VU and MSCA certificates from a Gen1 Overview record.
-func (opts AuthenticateOptions) extractGen1Certificates(overviewRecord *vuv1.RawVehicleUnitFile_Record) (*securityv1.RsaCertificate, *securityv1.RsaCertificate, error) {
-	data, _, err := splitTransferValue(overviewRecord)
+// verifyGen2Transfer verifies the ECDSA signature in a Gen2 transfer's SignatureRecordArray: over
+// the overview's data after its certificate arrays, over all the data of another transfer.
+func verifyGen2Transfer(record *vuv1.RawVehicleUnitFile_Record, chain *vuChain) *securityv1.Authentication {
+	data, signatureArray, err := splitTransferValue(record)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to split Overview transfer value: %w", err)
+		return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, err.Error())
 	}
-
-	// Gen1 Overview structure (from regulation):
-	// - MemberStateCertificate: 194 bytes
-	// - VuCertificate: 194 bytes
-	// - VehicleIdentificationNumber: variable
-	// - ...rest of data
-
-	const lenRsaCertificate = 194
-	const idxMscaCert = 0
-	const idxVuCert = 194
-	const minDataLen = 388 // Two certificates
-
-	if len(data) < minDataLen {
-		return nil, nil, fmt.Errorf("insufficient data for certificates: got %d, need at least %d", len(data), minDataLen)
+	recordType, signatures, size, err := recordArrayAt(signatureArray, 0)
+	switch {
+	case err != nil:
+		return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, fmt.Sprintf("SignatureRecordArray: %v", err))
+	case size != len(signatureArray):
+		return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, fmt.Sprintf("SignatureRecordArray: %d bytes follow it", len(signatureArray)-size))
+	case len(signatures) == 0:
+		return trust.WithStatus(chain.auth, securityv1.Authentication_SIGNATURE_MISSING, "the transfer's SignatureRecordArray holds no signature")
+	case recordType != recordTypeSignature || len(signatures) != 1:
+		return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID,
+			fmt.Sprintf("the SignatureRecordArray holds %d records of type 0x%02X, want one of type 0x%02X", len(signatures), recordType, recordTypeSignature))
+	case trust.Blank(signatures[0]):
+		return trust.WithStatus(chain.auth, securityv1.Authentication_SIGNATURE_MISSING, "the transfer's signature is zeroed")
+	case chain.gen2 == nil:
+		return proto.CloneOf(chain.auth)
 	}
-
-	// Extract MSCA certificate
-	mscaCertData := data[idxMscaCert : idxMscaCert+lenRsaCertificate]
-	mscaCert := &securityv1.RsaCertificate{}
-	mscaCert.SetRawData(mscaCertData)
-
-	// Extract VU certificate
-	vuCertData := data[idxVuCert : idxVuCert+lenRsaCertificate]
-	vuCert := &securityv1.RsaCertificate{}
-	vuCert.SetRawData(vuCertData)
-
-	return vuCert, mscaCert, nil
-}
-
-// verifyGen1CertificateChain verifies the certificate chain for Gen1:
-// EUR Root -> MSCA -> VU
-func (opts AuthenticateOptions) verifyGen1CertificateChain(ctx context.Context, vuCert *securityv1.RsaCertificate, mscaCert *securityv1.RsaCertificate, auth *securityv1.Authentication) error {
-	// Step 1: Get EUR root certificate
-	rootCert, err := opts.CertificateResolver.GetRootCertificate(ctx)
-	if err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("failed to get root certificate: %w", err)
-	}
-
-	// Step 2: Verify MSCA certificate against EUR root
-	if err := security.VerifyRsaCertificateWithRoot(mscaCert, rootCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("MSCA certificate verification failed: %w", err)
-	}
-
-	// Step 3: Verify VU certificate against MSCA
-	if err := security.VerifyRsaCertificateWithCA(vuCert, mscaCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_CERTIFICATE_VERIFICATION_FAILED)
-		return fmt.Errorf("VU certificate verification failed: %w", err)
-	}
-
-	// Step 4: Populate certificate info in auth
-	// TODO: Extract certificate info (CHR, nation, validity dates) and populate
-	// auth.signer_certificate and auth.root_certificate
-
-	return nil
-}
-
-// verifyGen1DataSignature verifies the RSA signature on the data portion of a Gen1 record.
-func (opts AuthenticateOptions) verifyGen1DataSignature(record *vuv1.RawVehicleUnitFile_Record, vuCert *securityv1.RsaCertificate, auth *securityv1.Authentication) error {
-	allData, signature, err := splitTransferValue(record)
-	if err != nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("failed to split transfer value: %w", err)
-	}
-
-	// Gen1 uses RSA-1024 with 128-byte signatures
-	const lenRsaSignature = 128
-	if len(signature) != lenRsaSignature {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("invalid signature length for Gen1: got %d, want %d", len(signature), lenRsaSignature)
-	}
-
-	// For Overview (TREP 01), Technical Data (TREP 05), and other Gen1 records,
-	// the signature is over the data AFTER the certificates.
-	// Each RSA certificate is 194 bytes: MSCA cert + VU cert = 388 bytes total.
-	var signedData []byte
-	transferType := record.GetType()
-
-	switch transferType {
-	case vuv1.TransferType_OVERVIEW_GEN1:
-		// Overview: Signature covers data from VehicleIdentificationNumber onwards (after 2 certificates)
-		const lenCertificates = 388 // 194 bytes MSCA + 194 bytes VU
-		if len(allData) <= lenCertificates {
-			auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-			return fmt.Errorf("insufficient data for Overview signature verification: got %d, need > %d", len(allData), lenCertificates)
+	if record.GetType() == vuv1.TransferType_OVERVIEW_GEN2_V1 || record.GetType() == vuv1.TransferType_OVERVIEW_GEN2_V2 {
+		offset := 0
+		for range 2 {
+			_, _, size, err := recordArrayAt(data, offset)
+			if err != nil {
+				return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, fmt.Sprintf("overview certificates: %v", err))
+			}
+			offset += size
 		}
-		signedData = allData[lenCertificates:]
-
-	case vuv1.TransferType_TECHNICAL_DATA_GEN1:
-		// Technical Data: Signature covers all data (no certificates in this record)
-		signedData = allData
-
-	case vuv1.TransferType_ACTIVITIES_GEN1:
-		// Activities: Signature covers all data (no certificates in this record)
-		signedData = allData
-
-	case vuv1.TransferType_EVENTS_AND_FAULTS_GEN1:
-		// Events/Faults: Signature covers all data (no certificates in this record)
-		signedData = allData
-
-	case vuv1.TransferType_DETAILED_SPEED_GEN1:
-		// Detailed Speed: Signature covers all data (no certificates in this record)
-		signedData = allData
-
-	default:
-		// For unknown transfer types, assume signature covers all data
-		signedData = allData
+		data = data[offset:]
 	}
-
-	// Verify the signature using PKCS#1 v1.5
-	if err := security.VerifyRsaDataSignature(signedData, signature, vuCert); err != nil {
-		auth.SetStatus(securityv1.Authentication_DATA_SIGNATURE_INVALID)
-		return fmt.Errorf("data signature verification failed: %w", err)
+	if err := security.VerifyEccDataSignature(data, signatures[0], chain.gen2); err != nil {
+		return trust.WithStatus(chain.auth, securityv1.Authentication_DATA_SIGNATURE_INVALID, err.Error())
 	}
-
-	return nil
+	return proto.CloneOf(chain.auth)
 }

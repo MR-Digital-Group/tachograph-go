@@ -113,4 +113,12 @@ message RsaCertificate {
   // When false or unset, either verification has not been performed or the
   // signature is invalid.
   bool signature_valid = 7;
+
+  // Certificate Holder Authorisation (CHA) - the tachograph application ID
+  // 'FF 54 41 43 48 4F' followed by the equipment type ('00' for a Member
+  // State).
+  //
+  // Extracted from bytes 9-15 of the recovered certificate content during
+  // signature recovery.
+  bytes certificate_holder_authorisation = 8;
 }

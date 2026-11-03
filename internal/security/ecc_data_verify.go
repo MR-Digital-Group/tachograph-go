@@ -2,8 +2,6 @@ package security
 
 import (
 	"crypto/ecdsa"
-	"crypto/sha256"
-	"crypto/sha512"
 	"fmt"
 	"math/big"
 
@@ -48,20 +46,9 @@ func VerifyEccDataSignature(data, signature []byte, cardCert *securityv1.EccCert
 		return fmt.Errorf("failed to parse curve: %w", err)
 	}
 
-	// Compute hash based on curve size
-	var hash []byte
-	switch hashBits {
-	case 256:
-		h := sha256.Sum256(data)
-		hash = h[:]
-	case 384:
-		h := sha512.Sum384(data)
-		hash = h[:]
-	case 512:
-		h := sha512.Sum512(data)
-		hash = h[:]
-	default:
-		return fmt.Errorf("unsupported hash size: %d bits", hashBits)
+	hash, err := hashFor(hashBits, data)
+	if err != nil {
+		return err
 	}
 
 	// Parse signature (plain format: r || s)

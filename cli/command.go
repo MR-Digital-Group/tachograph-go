@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/way-platform/tachograph-go"
@@ -61,7 +62,9 @@ func newParseCommand() *cobra.Command {
 			// Step 2: Optionally authenticate (works on raw files)
 			if *authenticate {
 				authOpts := tachograph.AuthenticateOptions{
-					Mutate: true, // Mutate for CLI efficiency
+					CertificateResolver: tachograph.DefaultCertificateResolver(),
+					ReceivedAt:          time.Now(), // a file on disk was received by now
+					Mutate:              true,       // Mutate for CLI efficiency
 				}
 				rawFile, err = authOpts.Authenticate(ctx, rawFile)
 				if err != nil {

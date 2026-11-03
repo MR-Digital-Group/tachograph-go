@@ -38,11 +38,11 @@ linters:
         linters:
           - gosec
         text: "G301|G304|G306|G703"
-      # SHA-1 is required by the EU tachograph standard (EC 2016/799 Annex 1C).
-      - path: "internal/security/"
+      # Gen1 is RSA-1024 with SHA-1 (EC 2016/799 Annex 1C, Appendix 11 part A); its tests and the test PKI generate such keys.
+      - path: "internal/security/|tachographtest/"
         linters:
           - gosec
-        text: "G401|G505"
+        text: "G401|G403|G505"
       # Tools: SHA-1 for cert chain verification, HTTP to configured CA URLs.
       - path: "tools/"
         linters:

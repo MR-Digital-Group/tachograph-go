@@ -22,12 +22,13 @@ import (
 //	    vuSensorPairedRecordArray                VuSensorPairedRecordArray,
 //	    vuSensorExternalGNSSCoupledRecordArray   VuSensorExternalGNSSCoupledRecordArray,
 //	    vuCalibrationRecordArray                 VuCalibrationRecordArray,
+//	    vuCardRecordArray                        VuCardRecordArray,
 //	    vuITSConsentRecordArray                  VuITSConsentRecordArray,
 //	    vuPowerSupplyInterruptionRecordArray      VuPowerSupplyInterruptionRecordArray,
 //	    signatureRecordArray                     SignatureRecordArray
 //	}
 func unmarshalTechnicalDataGen2V2(value []byte) (*vuv1.TechnicalDataGen2V2, error) {
-	totalSize, signatureSize, err := sizeOfTechnicalDataGen2V2(value)
+	totalSize, signatureSize, err := sizeOfTechnicalDataGen2(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate size: %w", err)
 	}
@@ -78,6 +79,15 @@ func unmarshalTechnicalDataGen2V2(value []byte) (*vuv1.TechnicalDataGen2V2, erro
 	}
 	td.SetCalibrationRecords(calRecords)
 	offset += bytesRead
+
+	// A VuCardRecordArray between the calibrations and the ITS consents is not modelled.
+	if offset < len(data) && data[offset] == recordTypeVuCard {
+		size, err := sizeOfRecordArray(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("VuCardRecordArray: %w", err)
+		}
+		offset += size
+	}
 
 	// VuITSConsentRecordArray
 	itsConsents, bytesRead, err := parseItsConsentRecordArrayGen2V2(data, offset)
@@ -176,7 +186,7 @@ func (opts MarshalOptions) MarshalTechnicalDataGen2V2(td *vuv1.TechnicalDataGen2
 	if sig := td.GetSignature(); len(sig) > 0 {
 		result = append(result, sig...)
 	} else {
-		result = appendRecordArrayHeader(result, 0x07, 0, 0)
+		result = appendRecordArrayHeader(result, recordTypeSignature, 0, 0)
 	}
 	return result, nil
 }

@@ -22,7 +22,7 @@ import (
 //	    signatureRecordArray         SignatureRecordArray
 //	}
 func unmarshalTechnicalDataGen2V1(value []byte) (*vuv1.TechnicalDataGen2V1, error) {
-	totalSize, signatureSize, err := sizeOfTechnicalDataGen2V1(value)
+	totalSize, signatureSize, err := sizeOfTechnicalDataGen2(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate size: %w", err)
 	}

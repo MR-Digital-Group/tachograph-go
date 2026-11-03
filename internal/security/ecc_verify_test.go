@@ -2,258 +2,91 @@ package security
 
 import (
 	"os"
-	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/way-platform/tachograph-go/internal/cert/certcache"
+	securityv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/security/v1"
 )
 
-func TestVerifyEccCertificateWithCA(t *testing.T) {
-	// First, we need to find and verify the Gen2 ERCA root certificate
-	// The Gen2 ERCA root is self-signed, so we need to identify it
-	// Based on index.json, the Gen2 ERCA has CAR = "18250066869740371713"
-
-	// For this test, we'll need to:
-	// 1. Find a Gen2 MSCA certificate
-	// 2. Find the Gen2 ERCA root certificate (self-signed, CAR == CHR)
-	// 3. Verify the MSCA cert against the root
-
-	// Test cases using real Finland MSCA certificates
-	tests := []struct {
-		name     string
-		mscaFile string // MSCA certificate file
-		mscaCHR  string // MSCA Certificate Holder Reference
-		mscaCAR  string // MSCA's CAR (should reference ERCA root)
-		ercaCHR  string // ERCA root CHR (same as CAR for self-signed)
-	}{
-		{
-			name:     "Finland MSCA Card42",
-			mscaFile: "testdata/certs/g2/finland_msca_card42.bin",
-			mscaCHR:  "1316820541130145537",
-			mscaCAR:  "18250066869740371713", // Gen2 ERCA root
-			ercaCHR:  "18250066869740371713", // Same for self-signed root
-		},
+// gen2Root parses the embedded ERCA Gen2(1) root certificate and verifies its self-signature.
+func gen2Root(t *testing.T) *securityv1.EccCertificate {
+	t.Helper()
+	root, err := UnmarshalEccCertificate(certcache.RootG2())
+	if err != nil {
+		t.Fatalf("unmarshal the ERCA Gen2 root: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Step 1: Find and parse the Gen2 ERCA root certificate
-			// The root is self-signed, so CAR == CHR
-			ercaPath := filepath.Join("..", "cert", "certcache", "g2", tt.ercaCHR+".bin")
-			ercaData, err := os.ReadFile(ercaPath)
-			if err != nil {
-				t.Skipf("ERCA root certificate not found at %s: %v", ercaPath, err)
-			}
-
-			ercaCert, err := UnmarshalEccCertificate(ercaData)
-			if err != nil {
-				t.Fatalf("Failed to unmarshal ERCA certificate: %v", err)
-			}
-
-			// Verify it's self-signed (CAR == CHR)
-			if ercaCert.GetCertificateAuthorityReference() != ercaCert.GetCertificateHolderReference() {
-				t.Fatalf("ERCA certificate is not self-signed: CAR=%s, CHR=%s",
-					ercaCert.GetCertificateAuthorityReference(),
-					ercaCert.GetCertificateHolderReference())
-			}
-
-			// Verify the ERCA root certificate against itself (self-signed)
-			err = VerifyEccCertificateWithCA(ercaCert, ercaCert)
-			if err != nil {
-				t.Fatalf("Failed to verify self-signed ERCA certificate: %v", err)
-			}
-
-			if !ercaCert.GetSignatureValid() {
-				t.Fatal("ERCA certificate signature_valid = false after self-verification")
-			}
-
-			// Step 2: Parse the MSCA certificate
-			mscaData, err := os.ReadFile(tt.mscaFile)
-			if err != nil {
-				t.Skipf("MSCA certificate not found at %s: %v", tt.mscaFile, err)
-			}
-
-			mscaCert, err := UnmarshalEccCertificate(mscaData)
-			if err != nil {
-				t.Fatalf("Failed to unmarshal MSCA certificate: %v", err)
-			}
-
-			// Verify the MSCA's CAR matches the ERCA's CHR
-			if mscaCert.GetCertificateAuthorityReference() != tt.mscaCAR {
-				t.Errorf("MSCA CAR = %s, want %s",
-					mscaCert.GetCertificateAuthorityReference(), tt.mscaCAR)
-			}
-
-			// Step 3: Verify the MSCA certificate against the ERCA root
-			err = VerifyEccCertificateWithCA(mscaCert, ercaCert)
-			if err != nil {
-				t.Fatalf("Failed to verify MSCA certificate against ERCA: %v", err)
-			}
-
-			// Validate signature_valid is set to true
-			if !mscaCert.GetSignatureValid() {
-				t.Error("MSCA certificate signature_valid = false after verification, want true")
-			}
-
-			// Validate the MSCA certificate fields are still intact
-			chr := mscaCert.GetCertificateHolderReference()
-			if chr != tt.mscaCHR {
-				t.Errorf("MSCA CHR = %s, want %s", chr, tt.mscaCHR)
-			}
-
-			// Validate public key is present
-			pubKey := mscaCert.GetPublicKey()
-			if pubKey == nil {
-				t.Fatal("MSCA PublicKey is nil after verification")
-			}
-
-			pointX := pubKey.GetPublicPointX()
-			pointY := pubKey.GetPublicPointY()
-			if len(pointX) == 0 || len(pointY) == 0 {
-				t.Error("MSCA public key coordinates are empty after verification")
-			}
-		})
+	if err := VerifyEccCertificateWithCA(root, root); err != nil {
+		t.Fatalf("the ERCA Gen2 root does not verify itself: %v", err)
 	}
+	if !root.GetSignatureValid() {
+		t.Fatal("signature_valid = false after the root verified itself")
+	}
+	return root
 }
 
-func TestVerifyEccCertificateWithCA_MultipleCountries(t *testing.T) {
-	// Load the Gen2 ERCA root certificate
-	const ercaCHR = "18250066869740371713"
-	ercaPath := filepath.Join("..", "cert", "certcache", "g2", ercaCHR+".bin")
-	ercaData, err := os.ReadFile(ercaPath)
+// finlandMSCA parses a Finnish Gen2 MSCA certificate as JRC publishes it.
+func finlandMSCA(t *testing.T, name string) *securityv1.EccCertificate {
+	t.Helper()
+	data, err := os.ReadFile("testdata/certs/g2/" + name)
 	if err != nil {
-		t.Skipf("ERCA root certificate not found: %v", err)
+		t.Fatalf("read %s: %v", name, err)
 	}
-
-	ercaCert, err := UnmarshalEccCertificate(ercaData)
+	cert, err := UnmarshalEccCertificate(data)
 	if err != nil {
-		t.Fatalf("Failed to unmarshal ERCA certificate: %v", err)
+		t.Fatalf("unmarshal %s: %v", name, err)
 	}
+	return cert
+}
 
-	// Verify ERCA is self-signed
-	err = VerifyEccCertificateWithCA(ercaCert, ercaCert)
-	if err != nil {
-		t.Fatalf("Failed to verify ERCA: %v", err)
+func TestVerifyEccCertificateWithCA(t *testing.T) {
+	root := gen2Root(t)
+	if got, want := root.GetCertificateHolderReference(), "18250066869740371713"; got != want {
+		t.Errorf("root CHR = %s, want %s (FD45432001FFFF01)", got, want)
 	}
-
-	// List of Finland MSCA certificates to test
-	mscaCerts := []struct {
-		filename string
-		chr      string
+	tests := []struct {
+		file string
+		chr  string
 	}{
-		{"testdata/certs/g2/finland_msca_card42.bin", "1316820541130145537"},
-		{"testdata/certs/g2/finland_msca_card43.bin", "1316820541146922753"},
+		{"finland_msca_card42.bin", "1316820541130145537"},
+		{"finland_msca_card43.bin", "1316820541146922753"},
 	}
-
-	successCount := 0
-	for _, msca := range mscaCerts {
-		t.Run(msca.chr, func(t *testing.T) {
-			mscaData, err := os.ReadFile(msca.filename)
-			if err != nil {
-				t.Skipf("Certificate not found: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			msca := finlandMSCA(t, tt.file)
+			if err := VerifyEccCertificateWithCA(msca, root); err != nil {
+				t.Fatalf("VerifyEccCertificateWithCA() = %v", err)
 			}
-
-			mscaCert, err := UnmarshalEccCertificate(mscaData)
-			if err != nil {
-				t.Fatalf("Failed to unmarshal: %v", err)
-			}
-
-			// Verify against ERCA root
-			err = VerifyEccCertificateWithCA(mscaCert, ercaCert)
-			if err != nil {
-				t.Errorf("Verification failed: %v", err)
-				return
-			}
-
-			if !mscaCert.GetSignatureValid() {
+			if !msca.GetSignatureValid() {
 				t.Error("signature_valid = false after verification")
-				return
 			}
-
-			successCount++
+			if got := msca.GetCertificateHolderReference(); got != tt.chr {
+				t.Errorf("CHR = %s, want %s", got, tt.chr)
+			}
 		})
-	}
-
-	if successCount == 0 {
-		t.Error("No MSCA certificates were successfully verified")
 	}
 }
 
 func TestVerifyEccCertificateWithCA_InvalidSignature(t *testing.T) {
-	// Load ERCA root
-	const ercaCHR = "18250066869740371713"
-	ercaPath := filepath.Join("..", "cert", "certcache", "g2", ercaCHR+".bin")
-	ercaData, err := os.ReadFile(ercaPath)
-	if err != nil {
-		t.Skipf("ERCA root certificate not found: %v", err)
+	root := gen2Root(t)
+	msca := finlandMSCA(t, "finland_msca_card42.bin")
+	r := slices.Clone(msca.GetSignature().GetR())
+	r[0] ^= 0x01
+	msca.GetSignature().SetR(r)
+	if err := VerifyEccCertificateWithCA(msca, root); err == nil {
+		t.Error("VerifyEccCertificateWithCA() accepted a corrupted signature")
 	}
-
-	ercaCert, err := UnmarshalEccCertificate(ercaData)
-	if err != nil {
-		t.Fatalf("Failed to unmarshal ERCA: %v", err)
-	}
-
-	err = VerifyEccCertificateWithCA(ercaCert, ercaCert)
-	if err != nil {
-		t.Fatalf("Failed to verify ERCA: %v", err)
-	}
-
-	// Load an MSCA certificate
-	mscaData, err := os.ReadFile("testdata/certs/g2/finland_msca_card42.bin")
-	if err != nil {
-		t.Skipf("MSCA certificate not found: %v", err)
-	}
-
-	mscaCert, err := UnmarshalEccCertificate(mscaData)
-	if err != nil {
-		t.Fatalf("Failed to unmarshal MSCA: %v", err)
-	}
-
-	// Corrupt the signature by flipping a bit
-	sig := mscaCert.GetSignature()
-	if sig != nil && len(sig.GetR()) > 0 {
-		corruptedR := make([]byte, len(sig.GetR()))
-		copy(corruptedR, sig.GetR())
-		corruptedR[0] ^= 0x01 // Flip a bit
-		sig.SetR(corruptedR)
-	}
-
-	// Verification should fail
-	err = VerifyEccCertificateWithCA(mscaCert, ercaCert)
-	if err == nil {
-		t.Error("VerifyEccCertificateWithCA() succeeded with corrupted signature, want error")
-	}
-
-	// signature_valid should be false
-	if mscaCert.GetSignatureValid() {
-		t.Error("signature_valid = true after failed verification, want false")
+	if msca.GetSignatureValid() {
+		t.Error("signature_valid = true after a failed verification")
 	}
 }
 
 func TestVerifyEccCertificateWithCA_CARMismatch(t *testing.T) {
-	// Load two Finland certificates
-	cert1Data, err := os.ReadFile("testdata/certs/g2/finland_msca_card42.bin")
-	if err != nil {
-		t.Skipf("Certificate not found: %v", err)
-	}
-
-	cert1, err := UnmarshalEccCertificate(cert1Data)
-	if err != nil {
-		t.Fatalf("Failed to unmarshal cert1: %v", err)
-	}
-
-	cert2Data, err := os.ReadFile("testdata/certs/g2/finland_msca_card43.bin")
-	if err != nil {
-		t.Skipf("Certificate not found: %v", err)
-	}
-
-	cert2, err := UnmarshalEccCertificate(cert2Data)
-	if err != nil {
-		t.Fatalf("Failed to unmarshal cert2: %v", err)
-	}
-
-	// Try to verify cert1 using cert2 as CA
-	// This should fail because cert1's CAR doesn't reference cert2
-	err = VerifyEccCertificateWithCA(cert1, cert2)
-	if err == nil {
-		t.Error("VerifyEccCertificateWithCA() succeeded with mismatched CAR/CHR, want error")
+	card42 := finlandMSCA(t, "finland_msca_card42.bin")
+	card43 := finlandMSCA(t, "finland_msca_card43.bin")
+	err := VerifyEccCertificateWithCA(card42, card43)
+	if err == nil || !strings.Contains(err.Error(), "does not name the issuer") {
+		t.Errorf("VerifyEccCertificateWithCA() = %v, want an issuer reference error", err)
 	}
 }

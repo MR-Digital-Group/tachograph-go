@@ -33,6 +33,11 @@ func VerifyEccCertificateWithEccRoot(cert, root *securityv1.EccCertificate) erro
 	if root == nil {
 		return fmt.Errorf("root certificate cannot be nil")
 	}
+	cert.SetSignatureValid(false)
+	// CSM_138: a certificate's CAR is its issuer's CHR.
+	if car, chr := cert.GetCertificateAuthorityReference(), root.GetCertificateHolderReference(); car != chr {
+		return fmt.Errorf("CAR %s does not name the issuer, whose CHR is %s", car, chr)
+	}
 
 	// Get root's public key
 	rootPubKey := root.GetPublicKey()
@@ -107,6 +112,7 @@ func VerifyEccCertificateWithEccRoot(cert, root *securityv1.EccCertificate) erro
 		return fmt.Errorf("ECDSA certificate signature verification failed")
 	}
 
+	cert.SetSignatureValid(true)
 	return nil
 }
 

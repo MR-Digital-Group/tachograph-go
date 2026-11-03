@@ -97,7 +97,7 @@ func (opts AuthenticateOptions) authenticateGen1CardFile(ctx context.Context, ra
 		}
 
 		// Skip unsigned EFs
-		if !isSignedEF(record.GetFile()) {
+		if !IsSignedFile(record.GetFile()) {
 			continue
 		}
 
@@ -150,7 +150,7 @@ func (opts AuthenticateOptions) authenticateGen2CardFile(ctx context.Context, ra
 		}
 
 		// Skip unsigned EFs
-		if !isSignedEF(record.GetFile()) {
+		if !IsSignedFile(record.GetFile()) {
 			continue
 		}
 
@@ -380,8 +380,9 @@ func (opts AuthenticateOptions) authenticateGen2EF(dataRecord *cardv1.RawCardFil
 	return nil
 }
 
-// isSignedEF returns true if the given EF type should have a signature.
-func isSignedEF(fileType cardv1.ElementaryFileType) bool {
+// IsSignedFile reports whether the regulation signs an EF of a card download (Appendix 7,
+// DDP_035): EF_ICC, EF_IC, EF_Card_Download and the certificate EFs are downloaded unsigned.
+func IsSignedFile(fileType cardv1.ElementaryFileType) bool {
 	// Per regulation, these EFs are NOT signed:
 	// - EF_ICC, EF_IC (common card files)
 	// - All certificate EFs

@@ -74,20 +74,9 @@ func VerifyEccCertificateWithEccRoot(cert, root *securityv1.EccCertificate) erro
 	// The certificate body to be signed includes the tag and length
 	certBody := bodySeq.FullBytes
 
-	// Hash the certificate body based on curve size
-	var hash []byte
-	switch hashBits {
-	case 256:
-		h := sha256.Sum256(certBody)
-		hash = h[:]
-	case 384:
-		h := sha512.Sum384(certBody)
-		hash = h[:]
-	case 512:
-		h := sha512.Sum512(certBody)
-		hash = h[:]
-	default:
-		return fmt.Errorf("unsupported hash size for ECDSA: %d bits", hashBits)
+	hash, err := hashFor(hashBits, certBody)
+	if err != nil {
+		return err
 	}
 
 	// Get certificate signature
@@ -159,5 +148,38 @@ func parseCurveOID(oid string) (hashBits int, curve elliptic.Curve, err error) {
 		return 521, elliptic.P521(), nil
 	default:
 		return 0, nil, fmt.Errorf("unsupported curve OID: %s", oid)
+	}
+}
+
+// hashFor hashes data with the SHA-2 function CSM_50 pairs with an ECC key size: SHA-256 for 256
+// bits, SHA-384 for 384, SHA-512 for 512 and for P-521's 521.
+func hashFor(bits int, data []byte) ([]byte, error) {
+	switch bits {
+	case 256:
+		h := sha256.Sum256(data)
+		return h[:], nil
+	case 384:
+		h := sha512.Sum384(data)
+		return h[:], nil
+	case 512, 521:
+		h := sha512.Sum512(data)
+		return h[:], nil
+	default:
+		return nil, fmt.Errorf("unsupported ECC key size: %d bits", bits)
+	}
+}
+
+// EccSignatureAlgorithm names the data signature algorithm of a Gen2 key on the curve with this OID.
+func EccSignatureAlgorithm(oid string) securityv1.SignatureAlgorithm {
+	bits, _, err := parseCurveOID(oid)
+	switch {
+	case err != nil:
+		return securityv1.SignatureAlgorithm_SIGNATURE_ALGORITHM_UNSPECIFIED
+	case bits == 256:
+		return securityv1.SignatureAlgorithm_ECDSA_WITH_SHA256
+	case bits == 384:
+		return securityv1.SignatureAlgorithm_ECDSA_WITH_SHA384
+	default:
+		return securityv1.SignatureAlgorithm_ECDSA_WITH_SHA512
 	}
 }

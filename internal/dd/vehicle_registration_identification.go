@@ -39,10 +39,14 @@ func (opts UnmarshalOptions) UnmarshalVehicleRegistrationIdentification(data []b
 		lenNumber = 14
 	)
 
-	// Parse nation (1 byte)
-	nationValue := int32(data[idxNation])
-	nation := ddv1.NationNumeric(nationValue)
-	vrn.SetNation(nation)
+	// Parse nation (1 byte). The byte is a protocol value that must be mapped
+	// through the protocol_enum_value annotation, not cast directly to the proto
+	// enum (their numbering differs, e.g. Norway protocol 37 == MONACO enum 37).
+	if nation, err := UnmarshalEnum[ddv1.NationNumeric](data[idxNation]); err == nil {
+		vrn.SetNation(nation)
+	} else {
+		vrn.SetNation(ddv1.NationNumeric_NATION_NUMERIC_UNRECOGNIZED)
+	}
 
 	// Parse registration number (14 bytes)
 	number, err := opts.UnmarshalStringValue(data[idxNumber : idxNumber+lenNumber])
@@ -67,8 +71,17 @@ func (opts MarshalOptions) MarshalVehicleRegistrationIdentification(vrn *ddv1.Ve
 
 	offset := 0
 
-	// Marshal nation (1 byte)
-	canvas[offset] = byte(vrn.GetNation())
+	// Marshal nation (1 byte) - map the enum back to its protocol value.
+	nation := vrn.GetNation()
+	if nation == ddv1.NationNumeric_NATION_NUMERIC_UNRECOGNIZED {
+		// UNRECOGNIZED values should not occur during marshalling
+		return nil, fmt.Errorf("cannot marshal UNRECOGNIZED nation (no unrecognized field)")
+	}
+	nationByte, err := MarshalEnum(nation)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal nation: %w", err)
+	}
+	canvas[offset] = nationByte
 	offset += 1
 
 	// Marshal registration number (14 bytes)
@@ -102,8 +115,11 @@ func (opts AnonymizeOptions) AnonymizeVehicleRegistrationIdentification(vreg *dd
 	}
 
 	result := &ddv1.VehicleRegistrationIdentification{}
-	// Preserve country (structural info)
-	result.SetNation(vreg.GetNation())
+	// Preserve country (structural info), and its absence: a Gen2 V1 overview's 14-byte
+	// VehicleRegistrationNumber has no nation and is written back without one.
+	if vreg.HasNation() {
+		result.SetNation(vreg.GetNation())
+	}
 	// Anonymize the registration number
 	result.SetNumber(opts.AnonymizeStringValue(vreg.GetNumber()))
 	return result

@@ -38,33 +38,53 @@ func unmarshalTechnicalDataGen2V1(value []byte) (*vuv1.TechnicalDataGen2V1, erro
 	td.SetRawData(value)
 	offset := 0
 
-	// VuIdentificationRecordArray
-	ddIdent, bytesRead, err := parseVuIdentificationRecordArrayGen2(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("parse VuIdentificationRecordArray: %w", err)
-	}
-	td.SetVuIdentification(vuIdentToGen2V1(ddIdent))
-	offset += bytesRead
+	// Gen2 V1 Technical Data contains a variable number of RecordArrays.
+	// Per the regulation (TREP 25), the full set is:
+	//   VuIdentification (0x19), SensorPaired (0x20), SensorExternalGNSSCoupled (0x21),
+	//   VuCalibrationRecord (0x0c), VuCardRecord (0x0e), VuITSConsentRecord (0x17),
+	//   VuPowerSupplyInterruptionRecord (0x1f), Signature (0x08).
+	// We parse known arrays and skip unrecognized ones.
+	for offset < len(data) {
+		recordType, recordSize, noOfRecords, headerSize, err := parseRecordArrayHeader(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("RecordArray header at offset %d: %w", offset, err)
+		}
 
-	// SensorPairedRecordArray
-	ddSensors, bytesRead, err := parseSensorPairedRecordArrayGen2(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("parse SensorPairedRecordArray: %w", err)
-	}
-	pairedSensors := make([]*vuv1.TechnicalDataGen2V1_PairedSensor, len(ddSensors))
-	for i, s := range ddSensors {
-		pairedSensors[i] = sensorPairedToGen2V1(s)
-	}
-	td.SetPairedSensors(pairedSensors)
-	offset += bytesRead
+		switch recordType {
+		case 0x19: // VuIdentification
+			ddIdent, bytesRead, err := parseVuIdentificationRecordArrayGen2(data, offset)
+			if err != nil {
+				return nil, fmt.Errorf("parse VuIdentificationRecordArray: %w", err)
+			}
+			td.SetVuIdentification(vuIdentToGen2V1(ddIdent))
+			offset += bytesRead
 
-	// VuCalibrationRecordArray
-	calRecords, bytesRead, err := parseCalibrationRecordArrayGen2V1(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("parse VuCalibrationRecordArray: %w", err)
+		case 0x20: // SensorPaired
+			ddSensors, bytesRead, err := parseSensorPairedRecordArrayGen2(data, offset)
+			if err != nil {
+				return nil, fmt.Errorf("parse SensorPairedRecordArray: %w", err)
+			}
+			pairedSensors := make([]*vuv1.TechnicalDataGen2V1_PairedSensor, len(ddSensors))
+			for i, s := range ddSensors {
+				pairedSensors[i] = sensorPairedToGen2V1(s)
+			}
+			td.SetPairedSensors(pairedSensors)
+			offset += bytesRead
+
+		case 0x0c: // VuCalibrationRecord
+			calRecords, bytesRead, err := parseCalibrationRecordArrayGen2V1(data, offset)
+			if err != nil {
+				return nil, fmt.Errorf("parse VuCalibrationRecordArray: %w", err)
+			}
+			td.SetCalibrationRecords(calRecords)
+			offset += bytesRead
+
+		default:
+			// Skip RecordArrays we don't semantically parse yet
+			// (SensorExternalGNSSCoupled, VuCard, VuITSConsent, VuPowerSupplyInterruption, etc.)
+			offset += headerSize + int(recordSize)*int(noOfRecords)
+		}
 	}
-	td.SetCalibrationRecords(calRecords)
-	offset += bytesRead
 
 	td.SetSignature(signature)
 
@@ -89,12 +109,20 @@ func (opts MarshalOptions) MarshalTechnicalDataGen2V1(td *vuv1.TechnicalDataGen2
 	var result []byte
 	marshalOpts := dd.MarshalOptions{}
 
+	// Record type constants from Data Dictionary Section 2.120
+	const (
+		rtVuIdentification = 0x19
+		rtSensorPaired     = 0x20
+		rtVuCalibration    = 0x0c
+		rtSignature        = 0x08
+	)
+
 	// VuIdentificationRecordArray (1 record × 124 bytes)
 	vuIdentData, err := marshalVuIdentificationGen2(marshalOpts, td.GetVuIdentification())
 	if err != nil {
 		return nil, fmt.Errorf("marshal VuIdentificationRecordArray: %w", err)
 	}
-	result = appendRecordArrayHeader(result, 0x01, 124, 1)
+	result = appendRecordArrayHeader(result, rtVuIdentification, 124, 1)
 	result = append(result, vuIdentData...)
 
 	// SensorPairedRecordArray (N records × 28 bytes)
@@ -103,7 +131,7 @@ func (opts MarshalOptions) MarshalTechnicalDataGen2V1(td *vuv1.TechnicalDataGen2
 	if err != nil {
 		return nil, fmt.Errorf("marshal SensorPairedRecordArray: %w", err)
 	}
-	result = appendRecordArrayHeader(result, 0x02, 28, uint16(len(sensors)))
+	result = appendRecordArrayHeader(result, rtSensorPaired, 28, uint16(len(sensors)))
 	result = append(result, sensorData...)
 
 	// VuCalibrationRecordArray (N records × 168 bytes)
@@ -112,7 +140,7 @@ func (opts MarshalOptions) MarshalTechnicalDataGen2V1(td *vuv1.TechnicalDataGen2
 	if err != nil {
 		return nil, fmt.Errorf("marshal VuCalibrationRecordArray: %w", err)
 	}
-	result = appendRecordArrayHeader(result, 0x03, 168, uint16(len(calRecords)))
+	result = appendRecordArrayHeader(result, rtVuCalibration, 168, uint16(len(calRecords)))
 	result = append(result, calData...)
 
 	// Signature: stored as complete SignatureRecordArray bytes (header + sig bytes).
@@ -120,7 +148,7 @@ func (opts MarshalOptions) MarshalTechnicalDataGen2V1(td *vuv1.TechnicalDataGen2
 	if sig := td.GetSignature(); len(sig) > 0 {
 		result = append(result, sig...)
 	} else {
-		result = appendRecordArrayHeader(result, 0x04, 0, 0)
+		result = appendRecordArrayHeader(result, rtSignature, 0, 0)
 	}
 	return result, nil
 }
@@ -182,7 +210,7 @@ func (opts AnonymizeOptions) anonymizeTechnicalDataGen2V1(td *vuv1.TechnicalData
 		anon.SetUnrecognizedPurpose(cal.GetUnrecognizedPurpose())
 		anon.SetWorkshopName(ddOpts.AnonymizeStringValue(cal.GetWorkshopName()))
 		anon.SetWorkshopAddress(ddOpts.AnonymizeStringValue(cal.GetWorkshopAddress()))
-		anon.SetWorkshopCardNumberAndGeneration(ddOpts.AnonymizeFullCardNumberAndGeneration(cal.GetWorkshopCardNumberAndGeneration()))
+		anon.SetWorkshopCardNumber(ddOpts.AnonymizeFullCardNumber(cal.GetWorkshopCardNumber()))
 		anon.SetWorkshopCardExpiryDate(cal.GetWorkshopCardExpiryDate())
 		anon.SetVin(ddOpts.AnonymizeIa5StringValue(cal.GetVin()))
 		anon.SetVehicleRegistration(ddOpts.AnonymizeVehicleRegistrationIdentification(cal.GetVehicleRegistration()))
@@ -280,9 +308,12 @@ func parseCalibrationRecordArrayGen2V1(data []byte, offset int) ([]*vuv1.Technic
 		return nil, 0, err
 	}
 
-	const expectedRecordSize = 168
-	if recordSize != expectedRecordSize {
-		return nil, 0, fmt.Errorf("expected Gen2 CalibrationRecord size %d, got %d", expectedRecordSize, recordSize)
+	// Gen2 V1 base calibration record is 168 bytes, but VUs with the ▼M3 amendment
+	// include additional fields (sealDataVu etc.) resulting in larger records (e.g. 222 bytes).
+	// The RecordArray header declares the actual record size; we require at least 168 bytes.
+	const minCalibrationRecordSize = 168
+	if int(recordSize) < minCalibrationRecordSize {
+		return nil, 0, fmt.Errorf("Gen2 CalibrationRecord size %d is below minimum %d", recordSize, minCalibrationRecordSize)
 	}
 
 	var unmarshalOpts dd.UnmarshalOptions
@@ -309,29 +340,33 @@ func parseCalibrationRecordArrayGen2V1(data []byte, offset int) ([]*vuv1.Technic
 
 // gen2CalibrationRecord holds the parsed fields of a Gen2 VuCalibrationRecord.
 type gen2CalibrationRecord struct {
-	purpose                  ddv1.CalibrationPurpose
-	unrecognizedPurpose      int32
-	workshopName             *ddv1.StringValue
-	workshopAddress          *ddv1.StringValue
-	workshopCardNumberAndGen *ddv1.FullCardNumberAndGeneration
-	workshopCardExpiryDate   *ddv1.Date
-	vin                      *ddv1.Ia5StringValue
-	vehicleRegistration      *ddv1.VehicleRegistrationIdentification
-	wVehicleCharConst        int32
-	kConstantRecordEquip     int32
-	lTyreCircumference       int32
-	tyreSize                 *ddv1.Ia5StringValue
-	authorisedSpeedKmh       int32
-	oldOdometerValueKm       int32
-	newOdometerValueKm       int32
-	oldTimeValue             *timestamppb.Timestamp
-	newTimeValue             *timestamppb.Timestamp
-	nextCalibrationDate      *timestamppb.Timestamp
+	purpose                ddv1.CalibrationPurpose
+	unrecognizedPurpose    int32
+	workshopName           *ddv1.StringValue
+	workshopAddress        *ddv1.StringValue
+	workshopCardNumber     *ddv1.FullCardNumber
+	workshopCardExpiryDate *timestamppb.Timestamp
+	vin                    *ddv1.Ia5StringValue
+	vehicleRegistration    *ddv1.VehicleRegistrationIdentification
+	wVehicleCharConst      int32
+	kConstantRecordEquip   int32
+	lTyreCircumference     int32
+	tyreSize               *ddv1.Ia5StringValue
+	authorisedSpeedKmh     int32
+	oldOdometerValueKm     int32
+	newOdometerValueKm     int32
+	oldTimeValue           *timestamppb.Timestamp
+	newTimeValue           *timestamppb.Timestamp
+	nextCalibrationDate    *timestamppb.Timestamp
 }
 
-// parseOneCalibrationRecordGen2 parses a single 168-byte Gen2 VuCalibrationRecord.
+// parseOneCalibrationRecordGen2 parses the base 168 bytes of a Gen2 VuCalibrationRecord.
 //
-// Gen2 layout (168 bytes) — identical to Gen1 except workshopCardNumber
+// Gen2 V1 VUs may emit records larger than 168 bytes (e.g. 222 bytes) when they include
+// additional fields such as sealDataVu (per ▼M3 amendment). Only the first 168 bytes
+// (the common Gen2 base fields) are parsed here; any trailing extension bytes are skipped.
+//
+// Gen2 base layout (168 bytes) — identical to Gen1 except workshopCardNumber
 // is FullCardNumberAndGeneration (19 bytes) instead of FullCardNumber (18 bytes):
 //
 //	calibrationPurpose CalibrationPurpose                          -- 1 byte (offset 0)
@@ -352,9 +387,9 @@ type gen2CalibrationRecord struct {
 //	newTimeValue TimeReal                                          -- 4 bytes (offset 160)
 //	nextCalibrationDate TimeReal                                   -- 4 bytes (offset 164)
 func parseOneCalibrationRecordGen2(opts dd.UnmarshalOptions, data []byte) (gen2CalibrationRecord, error) {
-	const lenRecord = 168
-	if len(data) != lenRecord {
-		return gen2CalibrationRecord{}, fmt.Errorf("invalid Gen2 CalibrationRecord size: got %d, want %d", len(data), lenRecord)
+	const minRecordLen = 168
+	if len(data) < minRecordLen {
+		return gen2CalibrationRecord{}, fmt.Errorf("invalid Gen2 CalibrationRecord size: got %d, want >= %d", len(data), minRecordLen)
 	}
 
 	const (
@@ -363,26 +398,26 @@ func parseOneCalibrationRecordGen2(opts dd.UnmarshalOptions, data []byte) (gen2C
 		lenWorkshopName       = 36
 		idxWorkshopAddress    = 37
 		lenWorkshopAddress    = 36
-		idxWorkshopCardAndGen = 73
-		lenWorkshopCardAndGen = 19
-		idxWorkshopCardExpiry = 92
+		idxWorkshopCard       = 73
+		lenWorkshopCard       = 18
+		idxWorkshopCardExpiry = 91
 		lenWorkshopCardExpiry = 4
-		idxVIN                = 96
+		idxVIN                = 95
 		lenVIN                = 17
-		idxVehicleReg         = 113
+		idxVehicleReg         = 112
 		lenVehicleReg         = 15
-		idxWVehicleChar       = 128
-		idxKConstant          = 130
-		idxLTyreCirc          = 132
-		idxTyreSize           = 134
+		idxWVehicleChar       = 127
+		idxKConstant          = 129
+		idxLTyreCirc          = 131
+		idxTyreSize           = 133
 		lenTyreSize           = 15
-		idxAuthorisedSpeed    = 149
-		idxOldOdometer        = 150
-		idxNewOdometer        = 153
-		idxOldTimeValue       = 156
+		idxAuthorisedSpeed    = 148
+		idxOldOdometer        = 149
+		idxNewOdometer        = 152
+		idxOldTimeValue       = 155
 		lenTimeValue          = 4
-		idxNewTimeValue       = 160
-		idxNextCalDate        = 164
+		idxNewTimeValue       = 159
+		idxNextCalDate        = 163
 	)
 
 	var r gen2CalibrationRecord
@@ -412,14 +447,14 @@ func parseOneCalibrationRecordGen2(opts dd.UnmarshalOptions, data []byte) (gen2C
 		return gen2CalibrationRecord{}, fmt.Errorf("workshop address: %w", err)
 	}
 
-	// workshopCardNumberAndGeneration (19 bytes)
-	r.workshopCardNumberAndGen, err = opts.UnmarshalFullCardNumberAndGeneration(data[idxWorkshopCardAndGen : idxWorkshopCardAndGen+lenWorkshopCardAndGen])
+	// workshopCardNumber (18 bytes, FullCardNumber)
+	r.workshopCardNumber, err = opts.UnmarshalFullCardNumber(data[idxWorkshopCard : idxWorkshopCard+lenWorkshopCard])
 	if err != nil {
-		return gen2CalibrationRecord{}, fmt.Errorf("workshop card number and generation: %w", err)
+		return gen2CalibrationRecord{}, fmt.Errorf("workshop card number: %w", err)
 	}
 
-	// workshopCardExpiryDate (4 bytes, Datef)
-	r.workshopCardExpiryDate, err = opts.UnmarshalDate(data[idxWorkshopCardExpiry : idxWorkshopCardExpiry+lenWorkshopCardExpiry])
+	// workshopCardExpiryDate (4 bytes, TimeReal)
+	r.workshopCardExpiryDate, err = opts.UnmarshalTimeReal(data[idxWorkshopCardExpiry : idxWorkshopCardExpiry+lenWorkshopCardExpiry])
 	if err != nil {
 		return gen2CalibrationRecord{}, fmt.Errorf("workshop card expiry date: %w", err)
 	}
@@ -494,20 +529,20 @@ func marshalOneCalibrationRecordGen2(opts dd.MarshalOptions, r gen2CalibrationRe
 		idxCalibrationPurpose = 0
 		idxWorkshopName       = 1
 		idxWorkshopAddress    = 37
-		idxWorkshopCardAndGen = 73
-		idxWorkshopCardExpiry = 92
-		idxVIN                = 96
-		idxVehicleReg         = 113
-		idxWVehicleChar       = 128
-		idxKConstant          = 130
-		idxLTyreCirc          = 132
-		idxTyreSize           = 134
-		idxAuthorisedSpeed    = 149
-		idxOldOdometer        = 150
-		idxNewOdometer        = 153
-		idxOldTimeValue       = 156
-		idxNewTimeValue       = 160
-		idxNextCalDate        = 164
+		idxWorkshopCard       = 73
+		idxWorkshopCardExpiry = 91
+		idxVIN                = 95
+		idxVehicleReg         = 112
+		idxWVehicleChar       = 127
+		idxKConstant          = 129
+		idxLTyreCirc          = 131
+		idxTyreSize           = 133
+		idxAuthorisedSpeed    = 148
+		idxOldOdometer        = 149
+		idxNewOdometer        = 152
+		idxOldTimeValue       = 155
+		idxNewTimeValue       = 159
+		idxNextCalDate        = 163
 	)
 
 	// calibrationPurpose (1 byte)
@@ -537,18 +572,18 @@ func marshalOneCalibrationRecordGen2(opts dd.MarshalOptions, r gen2CalibrationRe
 	}
 	copy(canvas[idxWorkshopAddress:idxWorkshopAddress+36], workshopAddressBytes)
 
-	// workshopCardNumberAndGeneration (19 bytes)
-	workshopCardBytes, err := opts.MarshalFullCardNumberAndGeneration(r.workshopCardNumberAndGen)
+	// workshopCardNumber (18 bytes, FullCardNumber)
+	workshopCardBytes, err := opts.MarshalFullCardNumber(r.workshopCardNumber)
 	if err != nil {
-		return nil, fmt.Errorf("workshop card number and generation: %w", err)
+		return nil, fmt.Errorf("workshop card number: %w", err)
 	}
-	if len(workshopCardBytes) != 19 {
-		return nil, fmt.Errorf("workshop card number and generation: expected 19 bytes, got %d", len(workshopCardBytes))
+	if len(workshopCardBytes) != 18 {
+		return nil, fmt.Errorf("workshop card number: expected 18 bytes, got %d", len(workshopCardBytes))
 	}
-	copy(canvas[idxWorkshopCardAndGen:idxWorkshopCardAndGen+19], workshopCardBytes)
+	copy(canvas[idxWorkshopCard:idxWorkshopCard+18], workshopCardBytes)
 
-	// workshopCardExpiryDate (4 bytes)
-	expiryDateBytes, err := opts.MarshalDate(r.workshopCardExpiryDate)
+	// workshopCardExpiryDate (4 bytes, TimeReal)
+	expiryDateBytes, err := opts.MarshalTimeReal(r.workshopCardExpiryDate)
 	if err != nil {
 		return nil, fmt.Errorf("workshop card expiry date: %w", err)
 	}
@@ -640,7 +675,7 @@ func gen2CalibrationToV1(r gen2CalibrationRecord) *vuv1.TechnicalDataGen2V1_Cali
 	rec.SetUnrecognizedPurpose(r.unrecognizedPurpose)
 	rec.SetWorkshopName(r.workshopName)
 	rec.SetWorkshopAddress(r.workshopAddress)
-	rec.SetWorkshopCardNumberAndGeneration(r.workshopCardNumberAndGen)
+	rec.SetWorkshopCardNumber(r.workshopCardNumber)
 	rec.SetWorkshopCardExpiryDate(r.workshopCardExpiryDate)
 	rec.SetVin(r.vin)
 	rec.SetVehicleRegistration(r.vehicleRegistration)
@@ -663,24 +698,24 @@ func gen2CalibrationFromV1(rec *vuv1.TechnicalDataGen2V1_CalibrationRecord) gen2
 		return gen2CalibrationRecord{}
 	}
 	return gen2CalibrationRecord{
-		purpose:                  rec.GetPurpose(),
-		unrecognizedPurpose:      rec.GetUnrecognizedPurpose(),
-		workshopName:             rec.GetWorkshopName(),
-		workshopAddress:          rec.GetWorkshopAddress(),
-		workshopCardNumberAndGen: rec.GetWorkshopCardNumberAndGeneration(),
-		workshopCardExpiryDate:   rec.GetWorkshopCardExpiryDate(),
-		vin:                      rec.GetVin(),
-		vehicleRegistration:      rec.GetVehicleRegistration(),
-		wVehicleCharConst:        rec.GetWVehicleCharacteristicConstant(),
-		kConstantRecordEquip:     rec.GetKConstantOfRecordingEquipment(),
-		lTyreCircumference:       rec.GetLTyreCircumferenceEighthsMm(),
-		tyreSize:                 rec.GetTyreSize(),
-		authorisedSpeedKmh:       rec.GetAuthorisedSpeedKmh(),
-		oldOdometerValueKm:       rec.GetOldOdometerValueKm(),
-		newOdometerValueKm:       rec.GetNewOdometerValueKm(),
-		oldTimeValue:             rec.GetOldTimeValue(),
-		newTimeValue:             rec.GetNewTimeValue(),
-		nextCalibrationDate:      rec.GetNextCalibrationDate(),
+		purpose:                rec.GetPurpose(),
+		unrecognizedPurpose:    rec.GetUnrecognizedPurpose(),
+		workshopName:           rec.GetWorkshopName(),
+		workshopAddress:        rec.GetWorkshopAddress(),
+		workshopCardNumber:     rec.GetWorkshopCardNumber(),
+		workshopCardExpiryDate: rec.GetWorkshopCardExpiryDate(),
+		vin:                    rec.GetVin(),
+		vehicleRegistration:    rec.GetVehicleRegistration(),
+		wVehicleCharConst:      rec.GetWVehicleCharacteristicConstant(),
+		kConstantRecordEquip:   rec.GetKConstantOfRecordingEquipment(),
+		lTyreCircumference:     rec.GetLTyreCircumferenceEighthsMm(),
+		tyreSize:               rec.GetTyreSize(),
+		authorisedSpeedKmh:     rec.GetAuthorisedSpeedKmh(),
+		oldOdometerValueKm:     rec.GetOldOdometerValueKm(),
+		newOdometerValueKm:     rec.GetNewOdometerValueKm(),
+		oldTimeValue:           rec.GetOldTimeValue(),
+		newTimeValue:           rec.GetNewTimeValue(),
+		nextCalibrationDate:    rec.GetNextCalibrationDate(),
 	}
 }
 

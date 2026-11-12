@@ -1,6 +1,8 @@
 package card
 
 import (
+	"encoding/binary"
+
 	cardv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/card/v1"
 	ddv1 "github.com/way-platform/tachograph-go/proto/gen/go/wayplatform/connect/tachograph/dd/v1"
 	"google.golang.org/protobuf/proto"
@@ -22,6 +24,21 @@ func InferFileType(input *cardv1.RawCardFile) cardv1.CardType {
 		}
 	}
 	return cardv1.CardType_CARD_TYPE_UNSPECIFIED
+}
+
+// StartsCardFile reports whether data opens with a card download's TLV header: the file ID of
+// a card EF and an appendix for its data or signature in the Tachograph or Tachograph_G2 DF
+// (Appendix 7, DDP_042). Any EF may come first, since EF_ICC and EF_IC are optional (DDP_035).
+func StartsCardFile(data []byte) bool {
+	if len(data) < 5 || data[2] > 0x03 {
+		return false
+	}
+	generation := ddv1.Generation_GENERATION_1
+	if data[2]&0x02 != 0 {
+		generation = ddv1.Generation_GENERATION_2
+	}
+	_, found := mapFidToElementaryFileType(binary.BigEndian.Uint16(data), generation)
+	return found
 }
 
 // mapFidToElementaryFileType maps a FID to its ElementaryFileType using protobuf annotations.

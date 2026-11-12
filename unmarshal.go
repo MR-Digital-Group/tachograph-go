@@ -63,8 +63,8 @@ func (o UnmarshalOptions) Unmarshal(data []byte) (*tachographv1.RawFile, error) 
 		rawFile.SetType(tachographv1.RawFile_VEHICLE_UNIT)
 		rawFile.SetVehicleUnit(vuRaw)
 
-	// Card file (starts with EF_ICC prefix 0x0002).
-	case binary.BigEndian.Uint16(data[0:2]) == 0x0002:
+	// Card file (starts with EF_ICC 0x0002, or the TLV header of another card EF).
+	case binary.BigEndian.Uint16(data[0:2]) == 0x0002 || card.StartsCardFile(data):
 		cardRaw, err := o.card().UnmarshalRawCardFile(data)
 		if err != nil {
 			return nil, err
